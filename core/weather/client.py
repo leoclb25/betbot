@@ -19,6 +19,8 @@ Ensemble members give us empirical probability distributions:
 
 from __future__ import annotations
 
+import os
+import random
 import time
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -28,8 +30,37 @@ from loguru import logger
 
 from core.models import EnsembleForecast, WeatherCondition, WeatherProbability
 
-# Minimum seconds between requests to the ensemble API (avoid 429)
-ENSEMBLE_RATE_LIMIT_SEC = 0.5
+# Open-Meteo free tier: space requests and retry on 429 (burst limits are strict).
+def _env_float(key: str, default: str) -> float:
+    try:
+        return float(os.getenv(key, default))
+    except ValueError:
+        return float(default)
+
+
+def _env_int(key: str, default: str) -> int:
+    try:
+        return int(os.getenv(key, default))
+    except ValueError:
+        return int(default)
+
+
+ENSEMBLE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_ENSEMBLE_MIN_INTERVAL", "1.35")
+ENSEMBLE_MAX_RETRIES = max(1, _env_int("OPEN_METEO_ENSEMBLE_MAX_RETRIES", "6"))
+GEOCODE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_GEOCODE_MIN_INTERVAL", "0.35")
+
+
+def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
+    """Seconds to wait after HTTP 429 (header Retry-After or exponential backoff + jitter)."""
+    ra = response.headers.get("Retry-After")
+    if ra:
+        try:
+            return min(120.0, float(ra))
+        except ValueError:
+            pass
+    base = min(90.0, 2.0 ** (attempt + 1))
+    return base * (1.0 + random.uniform(0.0, 0.2))
+
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -63,6 +94,7 @@ class WeatherClient:
         # to avoid redundant API calls within the same scan cycle
         self._forecast_cache: dict[tuple, EnsembleForecast] = {}
         self._last_ensemble_request: float = 0.0
+        self._last_geocode_request: float = 0.0
 
     # ── Geocoding ────────────────────────────────────────────────────────────
 
@@ -74,11 +106,16 @@ class WeatherClient:
         if location in self._geo_cache:
             return self._geo_cache[location]
 
+        elapsed = time.monotonic() - self._last_geocode_request
+        if elapsed < GEOCODE_MIN_INTERVAL_SEC:
+            time.sleep(GEOCODE_MIN_INTERVAL_SEC - elapsed)
+
         resp = self._session.get(
             GEOCODING_URL,
             params={"name": location, "count": 1, "language": "en", "format": "json"},
             timeout=10,
         )
+        self._last_geocode_request = time.monotonic()
         resp.raise_for_status()
         data = resp.json()
 
@@ -122,11 +159,6 @@ class WeatherClient:
             logger.debug(f"Forecast cache hit for {cache_key}")
             return self._forecast_cache[cache_key]
 
-        # Rate limit: wait between ensemble API requests
-        elapsed = time.monotonic() - self._last_ensemble_request
-        if elapsed < ENSEMBLE_RATE_LIMIT_SEC:
-            time.sleep(ENSEMBLE_RATE_LIMIT_SEC - elapsed)
-
         params = {
             "latitude": latitude,
             "longitude": longitude,
@@ -141,13 +173,37 @@ class WeatherClient:
             "timezone": "UTC",
         }
 
-        try:
-            self._last_ensemble_request = time.monotonic()
-            resp = self._session.get(ENSEMBLE_URL, params=params, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.error(f"Ensemble API error: {exc}")
+        data: Optional[dict] = None
+        for attempt in range(ENSEMBLE_MAX_RETRIES):
+            elapsed = time.monotonic() - self._last_ensemble_request
+            if elapsed < ENSEMBLE_MIN_INTERVAL_SEC:
+                time.sleep(ENSEMBLE_MIN_INTERVAL_SEC - elapsed)
+
+            try:
+                resp = self._session.get(ENSEMBLE_URL, params=params, timeout=20)
+                self._last_ensemble_request = time.monotonic()
+
+                if resp.status_code == 429:
+                    wait = _retry_after_seconds(resp, attempt)
+                    logger.warning(
+                        f"Open-Meteo ensemble 429 — esperando {wait:.1f}s "
+                        f"(intento {attempt + 1}/{ENSEMBLE_MAX_RETRIES})"
+                    )
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                break
+
+            except requests.RequestException as exc:
+                logger.error(f"Ensemble API error: {exc}")
+                return self._fallback_forecast(latitude, longitude, target_date, location_name)
+
+        if data is None:
+            logger.warning(
+                "Open-Meteo ensemble: agotados reintentos por 429; usando forecast determinístico"
+            )
             return self._fallback_forecast(latitude, longitude, target_date, location_name)
 
         hourly = data.get("hourly", {})
@@ -175,7 +231,7 @@ class WeatherClient:
             wind_speed_max_kmh=wind_max_members,
             member_count=len(precip_members),
         )
-        logger.info(
+        logger.debug(
             f"Ensemble forecast for {location_name or f'({latitude},{longitude})'} "
             f"on {target_date} | {forecast.member_count} members | "
             f"precip avg={sum(precip_members)/len(precip_members):.1f}mm "
@@ -237,7 +293,11 @@ class WeatherClient:
             "forecast_days": max(days_out + 1, 1),
         }
         try:
+            elapsed = time.monotonic() - self._last_ensemble_request
+            if elapsed < ENSEMBLE_MIN_INTERVAL_SEC:
+                time.sleep(ENSEMBLE_MIN_INTERVAL_SEC - elapsed)
             resp = self._session.get(FORECAST_URL, params=params, timeout=15)
+            self._last_ensemble_request = time.monotonic()
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:

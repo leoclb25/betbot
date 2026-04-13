@@ -424,6 +424,9 @@ El archivo `deploy/manage.sh` tiene comandos de atajo para no tener que recordar
 ```bash
 cd ~/betbot   # raíz del repo (misma ruta que usó setup_ec2.sh)
 
+# Eliminar datos modo paper
+python -m scripts.run paper-reset -y --with-logs --bot-log
+
 # Dar permisos de ejecución (solo la primera vez)
 chmod +x deploy/manage.sh
 
