@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# =============================================================================
+# setup_ec2.sh
+# Setup automático de BetBot en Ubuntu 22.04 (EC2 o cualquier VPS)
+#
+# Uso:
+#   chmod +x deploy/setup_ec2.sh
+#   sudo ./deploy/setup_ec2.sh
+#
+# Qué hace:
+#   1. Actualiza el sistema
+#   2. Instala Python 3.11
+#   3. Crea un usuario dedicado 'betbot'
+#   4. Clona el repo (o copia los archivos si ya están)
+#   5. Crea el entorno virtual e instala dependencias
+#   6. Instala y activa el servicio systemd
+#   7. Crea la estructura de directorios de datos
+# =============================================================================
+
+set -euo pipefail
+
+# ── Configuración ─────────────────────────────────────────────────────────────
+REPO_URL="${BETBOT_REPO_URL:-}"          # URL del repo git (opcional)
+INSTALL_DIR="/opt/betbot"               # Directorio de instalación
+SERVICE_USER="betbot"                   # Usuario del sistema que corre el bot
+PYTHON_VERSION="3.11"
+
+# Colores para output
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+log()  { echo -e "${GREEN}[+]${NC} $*"; }
+warn() { echo -e "${YELLOW}[!]${NC} $*"; }
+err()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
+
+# ── Verificar que corre como root ─────────────────────────────────────────────
+[[ $EUID -eq 0 ]] || err "Ejecutar con sudo: sudo ./deploy/setup_ec2.sh"
+
+# ── 1. Actualizar sistema e instalar dependencias ─────────────────────────────
+log "Actualizando sistema..."
+apt-get update -qq
+apt-get upgrade -y -qq
+
+log "Instalando dependencias del sistema..."
+apt-get install -y -qq \
+    software-properties-common \
+    build-essential \
+    curl \
+    wget \
+    git \
+    libssl-dev \
+    libffi-dev \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    logrotate \
+    htop \
+    nano
+
+# ── 2. Instalar Python 3.11 ───────────────────────────────────────────────────
+log "Instalando Python $PYTHON_VERSION..."
+add-apt-repository -y ppa:deadsnakes/ppa
+apt-get update -qq
+apt-get install -y -qq "python${PYTHON_VERSION}" "python${PYTHON_VERSION}-venv" "python${PYTHON_VERSION}-dev"
+
+PYTHON_BIN=$(which "python${PYTHON_VERSION}")
+log "Python instalado en: $PYTHON_BIN"
+"$PYTHON_BIN" --version
+
+# ── 3. Crear usuario del sistema ──────────────────────────────────────────────
+if id "$SERVICE_USER" &>/dev/null; then
+    warn "Usuario '$SERVICE_USER' ya existe, continuando..."
+else
+    log "Creando usuario del sistema '$SERVICE_USER'..."
+    useradd --system --shell /bin/bash --home-dir "$INSTALL_DIR" --create-home "$SERVICE_USER"
+fi
+
+# ── 4. Instalar el código ─────────────────────────────────────────────────────
+if [[ -n "$REPO_URL" ]]; then
+    log "Clonando repo desde $REPO_URL..."
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        warn "Repo ya existe, haciendo pull..."
+        cd "$INSTALL_DIR"
+        sudo -u "$SERVICE_USER" git pull
+    else
+        sudo -u "$SERVICE_USER" git clone "$REPO_URL" "$INSTALL_DIR"
+    fi
+else
+    # Asumir que el script corre desde dentro del repo ya copiado
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SOURCE_DIR="$(dirname "$SCRIPT_DIR")"
+
+    log "Copiando archivos desde $SOURCE_DIR a $INSTALL_DIR..."
+    rsync -a --exclude='.git' --exclude='.venv' --exclude='data' \
+        "$SOURCE_DIR/" "$INSTALL_DIR/"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+fi
+
+# ── 5. Crear directorios de datos ─────────────────────────────────────────────
+log "Creando directorios de datos..."
+mkdir -p "$INSTALL_DIR/data/logs"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/data"
+
+# ── 6. Crear entorno virtual e instalar dependencias ──────────────────────────
+VENV_DIR="$INSTALL_DIR/.venv"
+
+log "Creando entorno virtual en $VENV_DIR..."
+sudo -u "$SERVICE_USER" "$PYTHON_BIN" -m venv "$VENV_DIR"
+
+log "Instalando dependencias Python..."
+sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --upgrade pip -q
+sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install -e "$INSTALL_DIR" -q
+
+log "Dependencias instaladas:"
+sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" list --format=columns | grep -E "betbot|requests|pydantic|click|rich|loguru"
+
+# ── 7. Configurar .env ────────────────────────────────────────────────────────
+if [[ ! -f "$INSTALL_DIR/.env" ]]; then
+    log "Creando .env desde template..."
+    cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
+    chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/.env"
+    chmod 600 "$INSTALL_DIR/.env"   # solo el owner puede leerlo
+
+    warn "============================================================"
+    warn "  IMPORTANTE: Edita $INSTALL_DIR/.env antes de iniciar el bot"
+    warn "  nano $INSTALL_DIR/.env"
+    warn "============================================================"
+else
+    warn ".env ya existe, no se sobreescribe."
+fi
+
+# ── 8. Configurar logrotate ───────────────────────────────────────────────────
+log "Configurando logrotate..."
+cat > /etc/logrotate.d/betbot << EOF
+$INSTALL_DIR/data/logs/*.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 $SERVICE_USER $SERVICE_USER
+}
+
+$INSTALL_DIR/data/logs/operations.jsonl {
+    monthly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 $SERVICE_USER $SERVICE_USER
+}
+EOF
+
+# ── 9. Instalar servicio systemd ──────────────────────────────────────────────
+log "Instalando servicio systemd..."
+
+# Reemplazar el placeholder del directorio en el .service
+sed "s|__INSTALL_DIR__|$INSTALL_DIR|g; s|__SERVICE_USER__|$SERVICE_USER|g" \
+    "$INSTALL_DIR/deploy/betbot-weather.service" \
+    > /etc/systemd/system/betbot-weather.service
+
+systemctl daemon-reload
+systemctl enable betbot-weather
+
+log "Servicio instalado. Estado inicial:"
+systemctl status betbot-weather --no-pager || true
+
+# ── 10. Instrucciones finales ─────────────────────────────────────────────────
+echo ""
+echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}  ✓ BetBot instalado correctamente en $INSTALL_DIR      ${NC}"
+echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
+echo ""
+echo "  Próximos pasos:"
+echo ""
+echo "  1. Editar configuración:"
+echo "     sudo nano $INSTALL_DIR/.env"
+echo ""
+echo "  2. Probar con un ciclo manual:"
+echo "     sudo -u $SERVICE_USER $VENV_DIR/bin/python -m scripts.run weather --mode paper --once"
+echo ""
+echo "  3. Iniciar el servicio:"
+echo "     sudo systemctl start betbot-weather"
+echo ""
+echo "  4. Ver logs en tiempo real:"
+echo "     sudo journalctl -u betbot-weather -f"
+echo ""
+echo "  5. Ver balance:"
+echo "     sudo -u $SERVICE_USER $VENV_DIR/bin/python -m scripts.run status"
+echo ""

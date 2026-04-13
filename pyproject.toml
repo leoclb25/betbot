@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "betbot"
+version = "0.1.0"
+description = "Polymarket prediction market bots"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "numpy>=1.26",
+    "click>=8.1",
+    "rich>=13.7",
+    "loguru>=0.7",
+    "apscheduler>=3.10",
+    "py-clob-client>=0.18",
+    "web3>=6.15",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+betbot = "scripts.run:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "bots*", "scripts*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

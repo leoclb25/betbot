@@ -1,0 +1,70 @@
+# =============================================================================
+# betbot-weather.service
+# Servicio systemd para el bot de clima de BetBot
+#
+# Instalación (manual):
+#   sudo cp deploy/betbot-weather.service /etc/systemd/system/
+#   sudo sed -i 's|__INSTALL_DIR__|/opt/betbot|g' /etc/systemd/system/betbot-weather.service
+#   sudo sed -i 's|__SERVICE_USER__|betbot|g'      /etc/systemd/system/betbot-weather.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable betbot-weather
+#   sudo systemctl start betbot-weather
+#
+# (El script setup_ec2.sh hace esto automáticamente)
+# =============================================================================
+
+[Unit]
+Description=BetBot – Weather Prediction Market Bot
+Documentation=https://github.com/tu-usuario/betbot
+# Arrancar después de que haya red disponible
+After=network-online.target
+Wants=network-online.target
+# Si hay una base de datos o servicio externo del que dependa, agregarlo aquí
+
+[Service]
+# ── Identidad ────────────────────────────────────────────────────────────────
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__INSTALL_DIR__
+
+# ── Modo de trading (cambiar a "live" para wallet real) ───────────────────────
+# También se puede controlar desde el .env con BOT_MODE=paper|live
+Environment="BOT_MODE=paper"
+
+# ── Comando a ejecutar ────────────────────────────────────────────────────────
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m scripts.run weather --mode ${BOT_MODE}
+
+# ── Restart automático ────────────────────────────────────────────────────────
+# Si el proceso muere (error de red, excepción no manejada, etc.),
+# systemd lo reinicia después de 30 segundos.
+Restart=on-failure
+RestartSec=30s
+# Máximo 5 reinicios en 5 minutos antes de marcar como "failed"
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# ── Seguridad ────────────────────────────────────────────────────────────────
+# El proceso no puede escribir fuera de su directorio de trabajo y /tmp
+PrivateTmp=true
+# No puede ganar privilegios de root
+NoNewPrivileges=true
+# Proteger directorios del sistema como solo lectura
+ProtectSystem=strict
+# Permitir escritura solo en los directorios de datos del bot
+ReadWritePaths=__INSTALL_DIR__/data
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+# Los logs van a journald; ver con: journalctl -u betbot-weather -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=betbot-weather
+
+# ── Timeout ──────────────────────────────────────────────────────────────────
+# Tiempo máximo para que el proceso arranque
+TimeoutStartSec=60
+# Tiempo máximo para que el proceso se detenga limpiamente (Ctrl+C)
+TimeoutStopSec=30
+
+[Install]
+# Arrancar en el target multi-user (servidor normal sin GUI)
+WantedBy=multi-user.target

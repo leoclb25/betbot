@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────
+# BetBot global configuration
+# Values here are defaults; .env overrides take precedence.
+# ─────────────────────────────────────────────────────────────
+
+polymarket:
+  gamma_api_url: "https://gamma-api.polymarket.com"
+  clob_api_url: "https://clob.polymarket.com"
+  chain_id: 137  # Polygon Mainnet
+
+weather:
+  open_meteo_forecast_url: "https://api.open-meteo.com/v1/forecast"
+  open_meteo_ensemble_url: "https://ensemble-api.open-meteo.com/v1/ensemble"
+  geocoding_url: "https://geocoding-api.open-meteo.com/v1/search"
+  # Confidence decay per day out (further = less certain)
+  # adjusted_prob = 0.5 + (raw - 0.5) * confidence
+  confidence_per_day:
+    1: 0.92
+    2: 0.82
+    3: 0.70
+    4: 0.60
+    5: 0.52
+    6: 0.46
+    7: 0.40
+
+fees:
+  polymarket_fee_rate: 0.02  # 2% per trade
+  polygon_gas_usd: 0.05      # approximate gas cost per tx
+
+bots:
+  weather:
+    # Keywords used to filter weather markets from all Polymarket markets
+    keywords:
+      - "rain"
+      - "rainfall"
+      - "precipitation"
+      - "snow"
+      - "snowfall"
+      - "temperature"
+      - "degrees"
+      - "hurricane"
+      - "storm"
+      - "tornado"
+      - "flood"
+      - "drought"
+      - "heat"
+      - "cold"
+      - "frost"
+      - "wind"
+      - "sunny"
+      - "cloudy"
+      - "weather"
+      - "celsius"
+      - "fahrenheit"
+    # Precipitation threshold to consider "rain event" (mm)
+    rain_threshold_mm: 0.5
