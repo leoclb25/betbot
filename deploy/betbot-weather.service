@@ -4,7 +4,7 @@
 #
 # Instalación (manual):
 #   sudo cp deploy/betbot-weather.service /etc/systemd/system/
-#   sudo sed -i 's|__INSTALL_DIR__|/opt/betbot|g' /etc/systemd/system/betbot-weather.service
+#   sudo sed -i 's|__INSTALL_DIR__|/ruta/absoluta/al/repo/betbot|g' /etc/systemd/system/betbot-weather.service
 #   sudo sed -i 's|__SERVICE_USER__|betbot|g'      /etc/systemd/system/betbot-weather.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable betbot-weather

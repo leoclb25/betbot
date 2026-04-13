@@ -17,7 +17,8 @@
 
 set -euo pipefail
 
-INSTALL_DIR="/opt/betbot"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="betbot-weather"
 VENV_PYTHON="$INSTALL_DIR/.venv/bin/python"
 BOT_USER="betbot"

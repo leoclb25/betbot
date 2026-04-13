@@ -3,15 +3,19 @@
 # setup_ec2.sh
 # Setup automático de BetBot en Ubuntu 22.04 (EC2 o cualquier VPS)
 #
-# Uso:
+# Uso (desde la raíz del repo clonado):
 #   chmod +x deploy/setup_ec2.sh
 #   sudo ./deploy/setup_ec2.sh
+#
+# El directorio de instalación es la raíz del repositorio (no se usa /opt).
+#   BETBOT_INSTALL_DIR=/ruta/al/repo — otra raíz del repo (debe existir deploy/)
+#   BETBOT_REPO_URL=https://...     — clonar; destino = BETBOT_INSTALL_DIR o ~/betbot del usuario sudo
 #
 # Qué hace:
 #   1. Actualiza el sistema
 #   2. Instala Python 3.11
 #   3. Crea un usuario dedicado 'betbot'
-#   4. Clona el repo (o copia los archivos si ya están)
+#   4. Deja el código en el repo (o clona con BETBOT_REPO_URL)
 #   5. Crea el entorno virtual e instala dependencias
 #   6. Instala y activa el servicio systemd
 #   7. Crea la estructura de directorios de datos
@@ -19,17 +23,36 @@
 
 set -euo pipefail
 
-# ── Configuración ─────────────────────────────────────────────────────────────
-REPO_URL="${BETBOT_REPO_URL:-}"          # URL del repo git (opcional)
-INSTALL_DIR="/opt/betbot"               # Directorio de instalación
-SERVICE_USER="betbot"                   # Usuario del sistema que corre el bot
-PYTHON_VERSION="3.11"
+# ── Resolver rutas (funciona aunque se invoque con sudo) ──────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Colores para output
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
+
+# ── Configuración ─────────────────────────────────────────────────────────────
+REPO_URL="${BETBOT_REPO_URL:-}"
+SERVICE_USER="betbot"
+BETBOT_UNIX_HOME="/home/${SERVICE_USER}"
+PYTHON_VERSION="3.11"
+
+# Sin BETBOT_REPO_URL: se usa el repo donde está este script (o BETBOT_INSTALL_DIR).
+# Con BETBOT_REPO_URL: destino del clone = BETBOT_INSTALL_DIR o ~/betbot del usuario que invocó sudo.
+if [[ -n "$REPO_URL" ]]; then
+    if [[ -n "${BETBOT_INSTALL_DIR:-}" ]]; then
+        INSTALL_DIR="$BETBOT_INSTALL_DIR"
+    else
+        SUDOER_HOME="$(getent passwd "${SUDO_USER:-ubuntu}" 2>/dev/null | cut -d: -f6 || true)"
+        [[ -n "$SUDOER_HOME" ]] || err "Definí BETBOT_INSTALL_DIR=... o ejecutá con sudo desde un usuario con home (p. ej. ubuntu)"
+        INSTALL_DIR="${SUDOER_HOME}/betbot"
+        warn "Clonando en $INSTALL_DIR (definí BETBOT_INSTALL_DIR para otra ruta)"
+    fi
+else
+    INSTALL_DIR="${BETBOT_INSTALL_DIR:-$DEFAULT_REPO}"
+fi
 
 # ── Verificar que corre como root ─────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || err "Ejecutar con sudo: sudo ./deploy/setup_ec2.sh"
@@ -65,41 +88,43 @@ PYTHON_BIN=$(which "python${PYTHON_VERSION}")
 log "Python instalado en: $PYTHON_BIN"
 "$PYTHON_BIN" --version
 
-# ── 3. Crear usuario del sistema ──────────────────────────────────────────────
+# ── 3. Crear usuario del sistema (home propio, distinto del repo) ───────────
 if id "$SERVICE_USER" &>/dev/null; then
     warn "Usuario '$SERVICE_USER' ya existe, continuando..."
 else
-    log "Creando usuario del sistema '$SERVICE_USER'..."
-    useradd --system --shell /bin/bash --home-dir "$INSTALL_DIR" --create-home "$SERVICE_USER"
+    log "Creando usuario del sistema '$SERVICE_USER' (home $BETBOT_UNIX_HOME)..."
+    useradd --system --shell /bin/bash --home-dir "$BETBOT_UNIX_HOME" --create-home "$SERVICE_USER"
 fi
 
-# ── 4. Instalar el código ─────────────────────────────────────────────────────
+# ── 4. Código en INSTALL_DIR (raíz del repo) ─────────────────────────────────
 if [[ -n "$REPO_URL" ]]; then
-    log "Clonando repo desde $REPO_URL..."
+    log "Repositorio git: $REPO_URL → $INSTALL_DIR"
     if [[ -d "$INSTALL_DIR/.git" ]]; then
         warn "Repo ya existe, haciendo pull..."
-        cd "$INSTALL_DIR"
-        sudo -u "$SERVICE_USER" git pull
+        sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" pull
     else
-        sudo -u "$SERVICE_USER" git clone "$REPO_URL" "$INSTALL_DIR"
+        if [[ -e "$INSTALL_DIR" ]] && [[ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]]; then
+            err "INSTALL_DIR no está vacío: $INSTALL_DIR — vacía la carpeta o elige otra con BETBOT_INSTALL_DIR="
+        fi
+        mkdir -p "$(dirname "$INSTALL_DIR")"
+        git clone "$REPO_URL" "$INSTALL_DIR"
+        chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     fi
 else
-    # Asumir que el script corre desde dentro del repo ya copiado
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    SOURCE_DIR="$(dirname "$SCRIPT_DIR")"
-
-    log "Copiando archivos desde $SOURCE_DIR a $INSTALL_DIR..."
-    rsync -a --exclude='.git' --exclude='.venv' --exclude='data' \
-        "$SOURCE_DIR/" "$INSTALL_DIR/"
+    if [[ ! -f "$INSTALL_DIR/deploy/betbot-weather.service" ]]; then
+        err "No se encontró el repo en $INSTALL_DIR (falta deploy/betbot-weather.service). " \
+            "Ejecuta: cd /ruta/al/betbot && sudo ./deploy/setup_ec2.sh  o exporta BETBOT_INSTALL_DIR="
+    fi
+    log "Usando el repo ya presente en $INSTALL_DIR"
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 fi
 
-# ── 5. Crear directorios de datos ─────────────────────────────────────────────
+# ── 5. Crear directorios de datos ───────────────────────────────────────────
 log "Creando directorios de datos..."
 mkdir -p "$INSTALL_DIR/data/logs"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/data"
 
-# ── 6. Crear entorno virtual e instalar dependencias ──────────────────────────
+# ── 6. Crear entorno virtual e instalar dependencias ────────────────────────
 VENV_DIR="$INSTALL_DIR/.venv"
 
 log "Creando entorno virtual en $VENV_DIR..."
@@ -155,7 +180,6 @@ EOF
 # ── 9. Instalar servicio systemd ──────────────────────────────────────────────
 log "Instalando servicio systemd..."
 
-# Reemplazar el placeholder del directorio en el .service
 sed "s|__INSTALL_DIR__|$INSTALL_DIR|g; s|__SERVICE_USER__|$SERVICE_USER|g" \
     "$INSTALL_DIR/deploy/betbot-weather.service" \
     > /etc/systemd/system/betbot-weather.service
@@ -169,7 +193,7 @@ systemctl status betbot-weather --no-pager || true
 # ── 10. Instrucciones finales ─────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✓ BetBot instalado correctamente en $INSTALL_DIR      ${NC}"
+echo -e "${GREEN}  ✓ BetBot instalado en el repo: $INSTALL_DIR            ${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
 echo "  Próximos pasos:"
@@ -186,6 +210,6 @@ echo ""
 echo "  4. Ver logs en tiempo real:"
 echo "     sudo journalctl -u betbot-weather -f"
 echo ""
-echo "  5. Ver balance:"
-echo "     sudo -u $SERVICE_USER $VENV_DIR/bin/python -m scripts.run status"
+echo "  5. Gestionar desde el repo:"
+echo "     cd $INSTALL_DIR && ./deploy/manage.sh status"
 echo ""

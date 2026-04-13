@@ -288,44 +288,68 @@ chmod 400 tu-key.pem
 ssh -i tu-key.pem ubuntu@<IP_PUBLICA_EC2>
 ```
 
-### Paso 3 — Subir el código
+### Paso 3 — Tener el repo en el servidor (sin `/opt`)
 
-**Opción A: desde git (recomendado)**
+Todo queda en la carpeta del repositorio (por ejemplo `~/betbot`). El servicio systemd usa esa ruta como `WorkingDirectory`.
+
+**Opción A: clonar en el home de `ubuntu` (recomendado)**
 ```bash
 # En el servidor
-git clone https://github.com/tu-usuario/betbot.git /tmp/betbot
+cd ~
+git clone https://github.com/tu-usuario/betbot.git betbot
+cd betbot
 ```
 
 **Opción B: subir desde tu máquina local**
 ```bash
-# En tu máquina local
-scp -i tu-key.pem -r ./betbot ubuntu@<IP_EC2>:/tmp/betbot
+# En tu máquina local (crea ~/betbot en la EC2)
+scp -i tu-key.pem -r ./betbot ubuntu@<IP_EC2>:~/betbot
+# En el servidor
+ssh -i tu-key.pem ubuntu@<IP_EC2>
+cd ~/betbot
 ```
+
+**Opción C: descargar solo `setup_ec2.sh` y que clone el repo** (por defecto en `/home/ubuntu/betbot` si hiciste `sudo` como `ubuntu`):
+
+```bash
+wget -O setup_ec2.sh "https://raw.githubusercontent.com/tu-usuario/betbot/main/deploy/setup_ec2.sh"
+chmod +x setup_ec2.sh
+sudo BETBOT_REPO_URL="https://github.com/tu-usuario/betbot.git" ./setup_ec2.sh
+# Otra ruta: sudo BETBOT_REPO_URL="..." BETBOT_INSTALL_DIR=/home/ubuntu/mi-betbot ./setup_ec2.sh
+```
+
+Lo habitual en EC2 es la **opción A** (clonar y `cd` al repo) o **B**.
 
 ### Paso 4 — Ejecutar el script de setup
 
+Desde la **raíz del repo** (donde están `deploy/`, `pyproject.toml`, etc.):
+
 ```bash
-# En el servidor
-cd /tmp/betbot
+cd ~/betbot    # o la ruta donde clonaste
 chmod +x deploy/setup_ec2.sh
 sudo ./deploy/setup_ec2.sh
 ```
 
-El script hace todo automáticamente:
+Variables opcionales:
+- **`BETBOT_INSTALL_DIR`** — raíz del repo si no es el directorio desde el que corre el script (debe contener `deploy/betbot-weather.service`).
+- **`BETBOT_REPO_URL`** — clonar desde git; si no defines `BETBOT_INSTALL_DIR`, se usa `~/betbot` del usuario que hizo `sudo` (p. ej. `ubuntu`).
+
+El script hace automáticamente:
 - Instala Python 3.11
-- Crea el usuario del sistema `betbot`
-- Copia el código a `/opt/betbot`
+- Crea el usuario del sistema `betbot` (home Unix `/home/betbot`, distinto del repo)
+- Deja el código en el repo (no copia nada a `/opt`)
 - Crea el entorno virtual e instala dependencias
 - Configura el servicio systemd con restart automático
 - Configura logrotate para los archivos de log
 
-Al terminar verás las instrucciones exactas a seguir.
+Al terminar verás la ruta exacta del repo y los siguientes pasos.
 
 ### Paso 5 — Configurar el .env en el servidor
 
 ```bash
-sudo nano /opt/betbot/.env
+sudo nano ~/betbot/.env
 ```
+(Ajusta la ruta si clonaste en otro sitio.)
 
 Para **paper trading** en el servidor (recomendado para empezar):
 
@@ -349,8 +373,10 @@ POLY_CHAIN_ID=137
 ### Paso 6 — Probar y arrancar
 
 ```bash
+cd ~/betbot   # raíz del repo
+
 # Probar que funciona con un ciclo manual antes de activar el servicio
-sudo -u betbot /opt/betbot/.venv/bin/python -m scripts.run weather --mode paper --once
+sudo -u betbot .venv/bin/python -m scripts.run weather --mode paper --once
 
 # Si todo OK, arrancar el servicio
 sudo systemctl start betbot-weather
@@ -361,12 +387,37 @@ sudo systemctl status betbot-weather
 
 ---
 
+### Actualizar cuando hay cambios (pull + volver a correr)
+
+Al tener todo en el repo (`~/betbot`), los despliegues de código son:
+
+1. **Atajo (recomendado):** desde la raíz del repo hace `git pull`, reinstala el paquete editable (por si cambió `pyproject.toml` o dependencias) y reinicia el servicio:
+
+```bash
+cd ~/betbot
+./deploy/manage.sh update
+```
+
+2. **A mano:** mismo efectivo — parar, pull como usuario `betbot` (dueño del repo), actualizar el venv si hace falta, arrancar de nuevo:
+
+```bash
+cd ~/betbot
+sudo systemctl stop betbot-weather
+sudo -u betbot git pull
+sudo -u betbot .venv/bin/pip install -e . -q
+sudo systemctl start betbot-weather
+```
+
+Si solo cambiaron archivos `.py` sin tocar dependencias, en la práctica a veces alcanza con **`git pull`** + **`sudo systemctl restart betbot-weather`**; usar **`pip install -e .`** (o `manage.sh update`) cuando cambie **`pyproject.toml`** o el entorno.
+
+---
+
 ### Gestión diaria con manage.sh
 
 El archivo `deploy/manage.sh` tiene comandos de atajo para no tener que recordar systemd:
 
 ```bash
-cd /opt/betbot
+cd ~/betbot   # raíz del repo (misma ruta que usó setup_ec2.sh)
 
 # Dar permisos de ejecución (solo la primera vez)
 chmod +x deploy/manage.sh
@@ -423,7 +474,7 @@ Tras el setup con **`setup_ec2.sh`**, el bot **no depende de tu sesión SSH**: l
 | Que arranque solo al reiniciar la EC2 | `sudo systemctl enable betbot-weather` (si aún no lo hizo el setup) |
 | Que no arranque al reiniciar la EC2 | `sudo systemctl disable betbot-weather` |
 
-Los logs van a **journald** (`journalctl -u betbot-weather -f`) y el bot también escribe en **`/opt/betbot/data/logs/bot.log`** (loguru).
+Los logs van a **journald** (`journalctl -u betbot-weather -f`) y el bot también escribe en **`data/logs/bot.log`** dentro del repo (p. ej. `~/betbot/data/logs/bot.log`).
 
 #### Sin systemd (prueba rápida en tu `$HOME`)
 
