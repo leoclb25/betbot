@@ -14,7 +14,7 @@ Docs:
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -55,6 +55,10 @@ def _parse_market(raw: dict) -> Optional[Market]:
         # Strip trailing Z and parse
         end_date_str = end_date_str.replace("Z", "+00:00")
         end_date = datetime.fromisoformat(end_date_str)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+        else:
+            end_date = end_date.astimezone(timezone.utc)
 
         return Market(
             condition_id=raw["conditionId"],
@@ -133,10 +137,12 @@ class PolymarketClient:
         offset = 0
         batch = 100
 
-        while len(markets) < limit:
+        while True:
             params: dict = {
-                "_limit": min(batch, limit - len(markets)),
-                "_offset": offset,
+                "limit": batch,
+                "offset": offset,
+                "order": "volume",
+                "ascending": "false",
             }
             if active_only:
                 params["active"] = "true"
@@ -158,6 +164,8 @@ class PolymarketClient:
                     if not any(kw.lower() in question_lower for kw in keywords):
                         continue
                 markets.append(m)
+                if len(markets) >= limit:
+                    return markets
 
             if len(batch_data) < batch:
                 break
@@ -169,10 +177,13 @@ class PolymarketClient:
     def get_market(self, condition_id: str) -> Optional[Market]:
         """Fetch a single market by condition ID."""
         resp = self._session.get(f"{GAMMA_API}/markets/{condition_id}", timeout=15)
-        if resp.status_code == 404:
+        if resp.status_code in (404, 422):
             return None
         resp.raise_for_status()
-        return _parse_market(resp.json())
+        raw = resp.json()
+        if isinstance(raw, list):
+            return _parse_market(raw[0]) if raw else None
+        return _parse_market(raw)
 
     # ── Account ──────────────────────────────────────────────────────────────
 
@@ -236,7 +247,7 @@ class PolymarketClient:
             trade_id=trade_id,
             condition_id=market.condition_id,
             question=market.question,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             side=side,
             order_side=order_side,
             price=price,

@@ -11,7 +11,7 @@ Both are human-readable and machine-parseable.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.models import BotMode, PortfolioState, Trade
@@ -64,7 +64,7 @@ class OperationsLogger:
         edge: float,
     ) -> None:
         record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode.value,
             "event": "position_open",
             "condition_id": condition_id,
@@ -88,7 +88,7 @@ class OperationsLogger:
         reason: str,
     ) -> None:
         record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode.value,
             "event": "position_close",
             "condition_id": condition_id,
@@ -101,28 +101,10 @@ class OperationsLogger:
         }
         self._append(record)
 
-    def log_signal_skipped(
-        self,
-        condition_id: str,
-        question: str,
-        reason: str,
-        edge: float | None = None,
-    ) -> None:
-        record = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "mode": self.mode.value,
-            "event": "signal_skipped",
-            "condition_id": condition_id,
-            "question": question[:80],
-            "reason": reason,
-            "edge": round(edge, 4) if edge is not None else None,
-        }
-        self._append(record)
-
     def log_bot_event(self, event: str, details: dict) -> None:
         """Generic bot lifecycle event (scan_start, pause, resume, error)."""
         record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode.value,
             "event": event,
             **details,

@@ -5,7 +5,7 @@ All models are immutable (frozen) Pydantic v2 dataclasses.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -39,6 +39,7 @@ class WeatherCondition(str, Enum):
     SNOW = "snow"
     TEMPERATURE_ABOVE = "temperature_above"
     TEMPERATURE_BELOW = "temperature_below"
+    TEMPERATURE_EXACT = "temperature_exact"
     WIND_ABOVE = "wind_above"
     HURRICANE = "hurricane"
     STORM = "storm"
@@ -70,7 +71,12 @@ class Market(BaseModel):
     @computed_field
     @property
     def days_to_resolution(self) -> float:
-        delta = self.end_date - datetime.utcnow()
+        end = self.end_date
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        else:
+            end = end.astimezone(timezone.utc)
+        delta = end - datetime.now(timezone.utc)
         return max(0.0, delta.total_seconds() / 86400)
 
 

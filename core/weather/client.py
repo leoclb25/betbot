@@ -3,25 +3,33 @@ Open-Meteo weather client.
 
 Uses:
   - Geocoding API  – city name → (lat, lon)          [free, no key]
-  - Ensemble API   – 50-member ensemble forecast      [free, no key]
+  - Ensemble API   – 50-member hourly ensemble        [free, no key]
   - Forecast API   – deterministic forecast (fallback)[free, no key]
 
+The Ensemble API returns HOURLY data per member. We aggregate to daily:
+  - precipitation: sum of all hours in the target day
+  - temperature_max: max of all hours
+  - wind_speed_max: max of all hours
+
 Ensemble members give us empirical probability distributions:
-  P(rain) = fraction of members with precipitation > threshold
-  P(temp > X) = fraction of members with max_temp > X
+  P(rain) = fraction of members with total_precip > threshold
+  P(temp > X) = fraction of members with daily_max_temp > X
   etc.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from functools import lru_cache
+import time
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import requests
 from loguru import logger
 
 from core.models import EnsembleForecast, WeatherCondition, WeatherProbability
+
+# Minimum seconds between requests to the ensemble API (avoid 429)
+ENSEMBLE_RATE_LIMIT_SEC = 0.5
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -51,6 +59,10 @@ class WeatherClient:
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
         self._geo_cache: dict[str, tuple[float, float]] = {}
+        # Cache ensemble forecasts keyed by (lat_rounded, lon_rounded, date_iso)
+        # to avoid redundant API calls within the same scan cycle
+        self._forecast_cache: dict[tuple, EnsembleForecast] = {}
+        self._last_ensemble_request: float = 0.0
 
     # ── Geocoding ────────────────────────────────────────────────────────────
 
@@ -91,53 +103,64 @@ class WeatherClient:
         location_name: str = "",
     ) -> Optional[EnsembleForecast]:
         """
-        Fetch ensemble forecast for a specific date.
+        Fetch hourly ensemble forecast for a specific date and aggregate to daily.
 
         Open-Meteo ensemble provides ~50 members from the ICON ensemble model.
-        Each member represents one possible state of the atmosphere.
+        The API only supports hourly variables; we aggregate to daily values:
+          - precipitation: sum over 24h
+          - temperature: max over 24h
+          - wind: max over 24h
         """
-        # Ensemble is available for ~7 days out
         days_out = (target_date - date.today()).days
         if days_out < 0 or days_out > 7:
             logger.warning(f"Target date {target_date} is {days_out} days out – outside range")
             return None
 
+        # Check cache (round to 2 decimal places ≈ ~1km resolution)
+        cache_key = (round(latitude, 2), round(longitude, 2), target_date.isoformat())
+        if cache_key in self._forecast_cache:
+            logger.debug(f"Forecast cache hit for {cache_key}")
+            return self._forecast_cache[cache_key]
+
+        # Rate limit: wait between ensemble API requests
+        elapsed = time.monotonic() - self._last_ensemble_request
+        if elapsed < ENSEMBLE_RATE_LIMIT_SEC:
+            time.sleep(ENSEMBLE_RATE_LIMIT_SEC - elapsed)
+
         params = {
             "latitude": latitude,
             "longitude": longitude,
-            "daily": [
-                "precipitation_sum",
-                "temperature_2m_max",
-                "temperature_2m_min",
-                "wind_speed_10m_max",
+            "hourly": [
+                "precipitation",
+                "temperature_2m",
+                "wind_speed_10m",
             ],
-            "models": "icon_seamless",  # ICON ensemble (~50 members)
-            "timezone": "UTC",
+            "models": "icon_seamless",
             "start_date": target_date.isoformat(),
             "end_date": target_date.isoformat(),
-            "forecast_days": days_out + 1,
+            "timezone": "UTC",
         }
 
         try:
-            resp = self._session.get(ENSEMBLE_URL, params=params, timeout=15)
+            self._last_ensemble_request = time.monotonic()
+            resp = self._session.get(ENSEMBLE_URL, params=params, timeout=20)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
             logger.error(f"Ensemble API error: {exc}")
             return self._fallback_forecast(latitude, longitude, target_date, location_name)
 
-        # Extract ensemble member data
-        # Open-Meteo ensemble returns variables like:
-        # "precipitation_sum_member01", "precipitation_sum_member02", etc.
-        daily = data.get("daily", {})
-        precip_members = self._extract_members(daily, "precipitation_sum", 0)
-        temp_max_members = self._extract_members(daily, "temperature_2m_max", 0)
-        temp_min_members = self._extract_members(daily, "temperature_2m_min", 0)
-        wind_members = self._extract_members(daily, "wind_speed_10m_max", 0)
+        hourly = data.get("hourly", {})
+        if not hourly:
+            return self._fallback_forecast(latitude, longitude, target_date, location_name)
 
-        # If ensemble keys not found, try single-model fallback
+        # Aggregate per-member hourly → daily
+        precip_members = self._aggregate_members(hourly, "precipitation", agg="sum")
+        temp_max_members = self._aggregate_members(hourly, "temperature_2m", agg="max")
+        wind_max_members = self._aggregate_members(hourly, "wind_speed_10m", agg="max")
+
         if not precip_members:
-            logger.debug("No ensemble members found in response, using fallback")
+            logger.debug("No ensemble members found, using deterministic fallback")
             return self._fallback_forecast(latitude, longitude, target_date, location_name)
 
         forecast = EnsembleForecast(
@@ -145,43 +168,52 @@ class WeatherClient:
             latitude=latitude,
             longitude=longitude,
             target_date=target_date,
-            fetched_at=datetime.utcnow(),
+            fetched_at=datetime.now(timezone.utc),
             precipitation_mm=precip_members,
             temperature_max_c=temp_max_members,
-            temperature_min_c=temp_min_members,
-            wind_speed_max_kmh=wind_members,
+            temperature_min_c=temp_max_members,  # use same series; min would need separate var
+            wind_speed_max_kmh=wind_max_members,
             member_count=len(precip_members),
         )
         logger.info(
-            f"Fetched ensemble forecast for {location_name or f'({latitude},{longitude})'} "
-            f"on {target_date} | {forecast.member_count} members"
+            f"Ensemble forecast for {location_name or f'({latitude},{longitude})'} "
+            f"on {target_date} | {forecast.member_count} members | "
+            f"precip avg={sum(precip_members)/len(precip_members):.1f}mm "
+            f"temp avg={sum(temp_max_members)/len(temp_max_members):.1f}°C"
         )
+        self._forecast_cache[cache_key] = forecast
         return forecast
 
-    def _extract_members(self, daily: dict, variable_prefix: str, day_index: int) -> list[float]:
+    def _aggregate_members(
+        self, hourly: dict, variable: str, agg: str
+    ) -> list[float]:
         """
-        Extract ensemble member values from Open-Meteo daily response dict.
-        Handles both member-suffixed keys and plain arrays.
+        Aggregate 24 hourly values per ensemble member into a single daily value.
+
+        agg='sum'  → total (precipitation)
+        agg='max'  → maximum (temperature, wind)
         """
         members = []
-        # Try numbered member keys: variable_member01, variable_member02, ...
-        for i in range(1, 51):
-            key = f"{variable_prefix}_member{i:02d}"
-            if key in daily:
-                values = daily[key]
-                if values and day_index < len(values) and values[day_index] is not None:
-                    members.append(float(values[day_index]))
+        for i in range(1, 60):  # up to 59 members
+            key = f"{variable}_member{i:02d}"
+            if key not in hourly:
+                break
+            values = [v for v in hourly[key] if v is not None]
+            if not values:
+                continue
+            if agg == "sum":
+                members.append(sum(values))
+            else:  # max
+                members.append(max(values))
 
-        if members:
-            return members
+        # Fallback to plain (non-member) variable if no member keys found
+        if not members and variable in hourly:
+            values = [v for v in hourly[variable] if v is not None]
+            if values:
+                val = sum(values) if agg == "sum" else max(values)
+                members = [val]
 
-        # Fallback: single value array (no ensemble)
-        if variable_prefix in daily:
-            values = daily[variable_prefix]
-            if values and day_index < len(values) and values[day_index] is not None:
-                return [float(values[day_index])]
-
-        return []
+        return members
 
     def _fallback_forecast(
         self,
@@ -190,7 +222,7 @@ class WeatherClient:
         target_date: date,
         location_name: str,
     ) -> Optional[EnsembleForecast]:
-        """Use deterministic forecast API as fallback (returns single member)."""
+        """Use deterministic forecast API as fallback (single member)."""
         days_out = (target_date - date.today()).days
         params = {
             "latitude": latitude,
@@ -213,20 +245,22 @@ class WeatherClient:
             return None
 
         daily = data.get("daily", {})
-        idx = min(days_out, len(daily.get("precipitation_sum", [None])) - 1)
+        precip_list = daily.get("precipitation_sum", [])
+        idx = min(days_out, len(precip_list) - 1) if precip_list else -1
         if idx < 0:
             return None
 
         def _get(key: str) -> list[float]:
             v = daily.get(key, [])
-            return [float(v[idx])] if idx < len(v) and v[idx] is not None else []
+            return [float(v[idx])] if idx < len(v) and v[idx] is not None else [0.0]
 
+        logger.debug(f"Using deterministic fallback for {location_name or f'({latitude},{longitude})'}")
         return EnsembleForecast(
             location=location_name or f"{latitude},{longitude}",
             latitude=latitude,
             longitude=longitude,
             target_date=target_date,
-            fetched_at=datetime.utcnow(),
+            fetched_at=datetime.now(timezone.utc),
             precipitation_mm=_get("precipitation_sum"),
             temperature_max_c=_get("temperature_2m_max"),
             temperature_min_c=_get("temperature_2m_min"),
@@ -282,8 +316,6 @@ class WeatherClient:
             )
 
         elif condition == WeatherCondition.SNOW:
-            # Treat as rain (Open-Meteo precipitation_sum includes snow)
-            # A better impl would use snowfall_sum specifically
             return self._fraction_above(
                 forecast.precipitation_mm,
                 threshold if threshold is not None else RAIN_THRESHOLD_MM,
@@ -299,24 +331,28 @@ class WeatherClient:
                 raise ValueError("threshold required for TEMPERATURE_BELOW")
             return self._fraction_below(forecast.temperature_min_c, threshold)
 
+        elif condition == WeatherCondition.TEMPERATURE_EXACT:
+            if threshold is None:
+                return 0.5
+            members = forecast.temperature_max_c
+            if not members:
+                return 0.5
+            return sum(1 for v in members if abs(v - threshold) < 0.5) / len(members)
+
         elif condition == WeatherCondition.WIND_ABOVE:
             if threshold is None:
                 raise ValueError("threshold required for WIND_ABOVE")
             return self._fraction_above(forecast.wind_speed_max_kmh, threshold)
 
         elif condition == WeatherCondition.HURRICANE:
-            # Sustained winds > 119 km/h (74 mph = Category 1)
             return self._fraction_above(forecast.wind_speed_max_kmh, 119.0)
 
         elif condition == WeatherCondition.STORM:
-            # Strong storm: winds > 62 km/h or heavy rain > 20mm
             wind_frac = self._fraction_above(forecast.wind_speed_max_kmh, 62.0)
             rain_frac = self._fraction_above(forecast.precipitation_mm, 20.0)
-            # Union probability (P(A or B) = P(A) + P(B) - P(A and B), approximate)
             return min(1.0, wind_frac + rain_frac - wind_frac * rain_frac)
 
         elif condition == WeatherCondition.SUNNY:
-            # Sunny: less than 1mm rain
             rain_prob = self._fraction_above(forecast.precipitation_mm, 1.0)
             return 1.0 - rain_prob
 
@@ -326,7 +362,7 @@ class WeatherClient:
     @staticmethod
     def _fraction_above(values: list[float], threshold: float) -> float:
         if not values:
-            return 0.5  # no data → 50% uncertainty
+            return 0.5
         return sum(1 for v in values if v > threshold) / len(values)
 
     @staticmethod

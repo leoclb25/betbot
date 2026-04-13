@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -74,10 +74,12 @@ class PaperClient:
         offset = 0
         batch = 100
 
-        while len(markets) < limit:
+        while True:
             params: dict = {
-                "_limit": min(batch, limit - len(markets)),
-                "_offset": offset,
+                "limit": batch,
+                "offset": offset,
+                "order": "volume",
+                "ascending": "false",
             }
             if active_only:
                 params["active"] = "true"
@@ -99,6 +101,8 @@ class PaperClient:
                     if not any(kw.lower() in question_lower for kw in keywords):
                         continue
                 markets.append(m)
+                if len(markets) >= limit:
+                    return markets
 
             if len(batch_data) < batch:
                 break
@@ -109,10 +113,15 @@ class PaperClient:
 
     def get_market(self, condition_id: str) -> Optional[Market]:
         resp = self._session.get(f"{GAMMA_API}/markets/{condition_id}", timeout=15)
-        if resp.status_code == 404:
+        if resp.status_code in (404, 422):
+            # 404 = not found, 422 = invalid condition_id format for this endpoint
             return None
         resp.raise_for_status()
-        return _parse_market(resp.json())
+        raw = resp.json()
+        # The single-market endpoint may return a list or a dict
+        if isinstance(raw, list):
+            return _parse_market(raw[0]) if raw else None
+        return _parse_market(raw)
 
     # ── Account ──────────────────────────────────────────────────────────────
 
@@ -156,7 +165,7 @@ class PaperClient:
             trade_id=trade_id,
             condition_id=market.condition_id,
             question=market.question,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             side=side,
             order_side=order_side,
             price=price,
@@ -229,7 +238,7 @@ class PaperClient:
                 "status": PositionStatus.CLOSED,
                 "exit_price": current_price,
                 "exit_fee_usd": fee_usd,
-                "closed_at": datetime.utcnow(),
+                "closed_at": datetime.now(timezone.utc),
                 "pnl_usd": pnl_usd,
                 "pnl_pct": pnl_pct,
                 "exit_reason": reason,
@@ -241,7 +250,7 @@ class PaperClient:
             trade_id=str(uuid4()),
             condition_id=market.condition_id,
             question=market.question,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             side=position.side,
             order_side=OrderSide.SELL,
             price=current_price,

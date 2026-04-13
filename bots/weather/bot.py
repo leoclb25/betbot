@@ -153,11 +153,11 @@ class WeatherBot(BaseBot):
 
     # ── Entry / Exit execution ───────────────────────────────────────────────
 
-    def _execute_entry(self, signal: BotSignal) -> None:
+    def _execute_entry(self, signal: BotSignal, market=None) -> None:
         """Open a new position based on an ENTER signal."""
-        market = self.client.get_market(signal.condition_id)
+        # market is passed in from _act_on_signal to avoid a redundant API call
         if market is None:
-            logger.error(f"Market {signal.condition_id} disappeared before entry")
+            logger.error(f"Market {signal.condition_id} not available for entry")
             return
 
         if isinstance(self.client, PaperClient):

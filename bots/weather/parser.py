@@ -4,13 +4,16 @@ Weather market parser.
 Parses natural language Polymarket questions into structured WeatherMarketInfo
 objects that the strategy can work with.
 
-Examples of questions it can parse:
-  "Will it rain in New York City on April 15, 2025?"
-  "Will the high temperature in Miami exceed 95°F on July 4?"
-  "Will there be a hurricane in the Gulf of Mexico by October 31?"
-  "Will London receive more than 10mm of rain on March 22?"
-  "Will temperatures in Chicago drop below 0°F on January 5?"
-  "Will wind speeds in Boston exceed 60 mph on December 3?"
+Polymarket weather questions follow a very consistent format:
+  "Will the highest temperature in {CITY} be {X}°C on {DATE}?"
+  "Will the highest temperature in {CITY} be {X}°C or higher on {DATE}?"
+  "Will the highest temperature in {CITY} be {X}°C or below on {DATE}?"
+  "Will the highest temperature in {CITY} be between {X}-{Y}°F on {DATE}?"
+  "Will it rain in {CITY} on {DATE}?"
+  "Will there be a hurricane ..."
+
+The parser handles all these patterns and maps them to structured data
+the strategy can use to fetch the correct weather forecast.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from loguru import logger
 from core.models import WeatherCondition, WeatherMarketInfo
 from core.weather.client import WeatherClient
 
-# Months for parsing
+# Month name → number
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -40,26 +43,58 @@ MONTH_MAP = {
     "december": 12, "dec": 12,
 }
 
-# Known major cities for geocoding (fallback pattern matching)
-KNOWN_CITIES = [
-    "New York", "New York City", "NYC", "Los Angeles", "Chicago", "Houston",
+# Comprehensive city list – sorted longest-first so multi-word names match first
+KNOWN_CITIES = sorted([
+    # North America
+    "New York City", "New York", "NYC", "Los Angeles", "Chicago", "Houston",
     "Phoenix", "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose",
     "Austin", "Jacksonville", "Fort Worth", "Columbus", "Charlotte", "Indianapolis",
     "San Francisco", "Seattle", "Denver", "Nashville", "Oklahoma City", "El Paso",
-    "Washington DC", "Las Vegas", "Louisville", "Memphis", "Portland", "Baltimore",
-    "Milwaukee", "Albuquerque", "Tucson", "Fresno", "Sacramento", "Mesa",
-    "Kansas City", "Atlanta", "Omaha", "Colorado Springs", "Raleigh", "Virginia Beach",
-    "Long Beach", "Minneapolis", "Tampa", "New Orleans", "Arlington", "Bakersfield",
-    "Honolulu", "Anchorage", "Miami", "Boston", "Detroit",
-    # International
-    "London", "Paris", "Berlin", "Tokyo", "Beijing", "Sydney", "Melbourne",
-    "Toronto", "Vancouver", "Mexico City", "São Paulo", "Buenos Aires",
-    "Mumbai", "Delhi", "Shanghai", "Dubai", "Moscow", "Cairo",
-    "Lagos", "Nairobi", "Cape Town", "Johannesburg",
-]
-
-# Sort by length descending so longer names match first (e.g. "New York City" before "New York")
-KNOWN_CITIES.sort(key=len, reverse=True)
+    "Washington DC", "Washington", "Las Vegas", "Louisville", "Memphis", "Portland",
+    "Baltimore", "Milwaukee", "Albuquerque", "Tucson", "Fresno", "Sacramento",
+    "Mesa", "Kansas City", "Atlanta", "Omaha", "Colorado Springs", "Raleigh",
+    "Virginia Beach", "Long Beach", "Minneapolis", "Tampa", "New Orleans",
+    "Arlington", "Bakersfield", "Honolulu", "Anchorage", "Miami", "Boston",
+    "Detroit", "Montreal", "Toronto", "Vancouver", "Calgary", "Ottawa",
+    "Mexico City", "Guadalajara", "Monterrey", "Panama City",
+    # South America
+    "São Paulo", "Sao Paulo", "Rio de Janeiro", "Buenos Aires", "Bogota",
+    "Lima", "Santiago", "Caracas", "Medellin", "Cali",
+    # Europe
+    "London", "Paris", "Berlin", "Madrid", "Rome", "Barcelona", "Vienna",
+    "Amsterdam", "Brussels", "Warsaw", "Prague", "Budapest", "Bucharest",
+    "Stockholm", "Copenhagen", "Oslo", "Helsinki", "Zurich", "Geneva",
+    "Lisbon", "Athens", "Istanbul", "Ankara", "Kyiv", "Kiev", "Minsk",
+    "Munich", "Hamburg", "Frankfurt", "Milan", "Naples", "Turin",
+    "Marseille", "Lyon", "Rotterdam", "Antwerp", "Dublin", "Edinburgh",
+    "Manchester", "Birmingham", "Liverpool", "Vilnius", "Riga", "Tallinn",
+    "Ljubljana", "Zagreb", "Belgrade", "Sarajevo", "Skopje", "Sofia",
+    "Chisinau", "Tirana", "Podgorica", "Valletta", "Nicosia",
+    # Asia
+    "Tokyo", "Beijing", "Shanghai", "Shenzhen", "Guangzhou", "Chengdu",
+    "Chongqing", "Wuhan", "Xi'an", "Nanjing", "Tianjin", "Hangzhou",
+    "Mumbai", "Delhi", "Kolkata", "Chennai", "Bangalore", "Hyderabad",
+    "Ahmedabad", "Pune", "Surat", "Lucknow", "Jaipur", "Kanpur",
+    "Seoul", "Busan", "Incheon", "Daegu", "Daejeon",
+    "Osaka", "Nagoya", "Sapporo", "Fukuoka", "Kobe",
+    "Hong Kong", "Taipei", "Kaohsiung", "Taichung",
+    "Singapore", "Kuala Lumpur", "Jakarta", "Bangkok", "Ho Chi Minh City",
+    "Hanoi", "Manila", "Dhaka", "Karachi", "Lahore", "Islamabad",
+    "Colombo", "Yangon", "Phnom Penh", "Vientiane",
+    "Ulaanbaatar",
+    # Middle East
+    "Dubai", "Abu Dhabi", "Riyadh", "Jeddah", "Kuwait City", "Doha",
+    "Muscat", "Bahrain", "Tel Aviv", "Jerusalem", "Amman", "Beirut",
+    "Baghdad", "Tehran", "Kabul",
+    # Africa
+    "Cairo", "Alexandria", "Lagos", "Abuja", "Nairobi", "Mombasa",
+    "Addis Ababa", "Dar es Salaam", "Kinshasa", "Johannesburg", "Cape Town",
+    "Durban", "Pretoria", "Casablanca", "Tunis", "Algiers", "Accra",
+    "Kampala", "Kigali", "Lusaka", "Harare", "Maputo", "Luanda",
+    # Oceania
+    "Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide", "Auckland",
+    "Wellington", "Christchurch",
+], key=len, reverse=True)
 
 
 class WeatherMarketParser:
@@ -71,7 +106,7 @@ class WeatherMarketParser:
     def parse(self, condition_id: str, question: str) -> Optional[WeatherMarketInfo]:
         """
         Parse a market question.
-        Returns None if this doesn't look like a parseable weather market.
+        Returns None if not parseable (not a weather market or no location/date found).
         """
         q = question.strip()
 
@@ -109,21 +144,29 @@ class WeatherMarketParser:
 
     def _extract_location(self, question: str) -> Optional[str]:
         """Try several heuristics to find the city/location in the question."""
-        # Strategy 1: known city list
+        # Strategy 1: exact match from known city list (catches multi-word names like "New York City")
         q_lower = question.lower()
         for city in KNOWN_CITIES:
             if city.lower() in q_lower:
                 return city
 
-        # Strategy 2: "in [City]" pattern
-        m = re.search(r"\bin\s+([A-Z][a-zA-Z\s]{2,25})(?:\s+on|\s+by|\s+exceed|\s+drop|[,?])", question)
+        # Strategy 2: "in [City]" pattern – stop at "be", "on", "by", punctuation
+        # This handles unknown cities not in the list above
+        m = re.search(
+            r"\bin\s+([A-Z][a-zA-Z](?:[a-zA-Z\s\']{1,30})?)(?=\s+(?:be|on|by|exceed|drop|below)|[,?])",
+            question,
+        )
         if m:
             candidate = m.group(1).strip()
-            if len(candidate) > 2:
+            # Filter out false positives like "the" or short noise words
+            if len(candidate) >= 3 and candidate.lower() not in {"the", "a", "an"}:
                 return candidate
 
         # Strategy 3: "at [City]" pattern
-        m = re.search(r"\bat\s+([A-Z][a-zA-Z\s]{2,20})(?:\s+on|\s+exceed|\s+[,?])", question)
+        m = re.search(
+            r"\bat\s+([A-Z][a-zA-Z](?:[a-zA-Z\s\']{1,30})?)(?=\s+(?:be|on|exceed)|[,?])",
+            question,
+        )
         if m:
             return m.group(1).strip()
 
@@ -138,8 +181,7 @@ class WeatherMarketParser:
 
         # Pattern: "on April 15", "on April 15, 2025", "on April 15th"
         m = re.search(
-            r"on\s+(\w+)\s+(\d{1,2})(?:st|nd|rd|th)?"
-            r"(?:,?\s+(\d{4}))?",
+            r"on\s+(\w+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?",
             q_lower,
         )
         if m:
@@ -150,7 +192,6 @@ class WeatherMarketParser:
                 year = int(year_str) if year_str else today.year
                 try:
                     d = date(year, month, day)
-                    # If date is in the past, try next year
                     if d < today and not year_str:
                         d = date(year + 1, month, day)
                     return d
@@ -166,26 +207,22 @@ class WeatherMarketParser:
             month_str, day_str, year_str = m.group(1), m.group(2), m.group(3)
             month = MONTH_MAP.get(month_str)
             if month:
-                day = int(day_str)
-                year = int(year_str) if year_str else today.year
                 try:
-                    return date(year, month, day)
+                    return date(int(year_str) if year_str else today.year, month, int(day_str))
                 except ValueError:
                     pass
 
-        # Pattern: MM/DD/YYYY or MM/DD/YY
+        # Pattern: MM/DD/YYYY
         m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", question)
         if m:
             try:
-                month, day = int(m.group(1)), int(m.group(2))
-                year = int(m.group(3))
+                month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 if year < 100:
                     year += 2000
                 return date(year, month, day)
             except ValueError:
                 pass
 
-        # Pattern: "today", "tomorrow", "this week"
         if "today" in q_lower:
             return today
         if "tomorrow" in q_lower:
@@ -198,68 +235,114 @@ class WeatherMarketParser:
     def _extract_condition(
         self, question: str
     ) -> tuple[WeatherCondition, Optional[float], Optional[str]]:
-        """Extract condition type, threshold value, and unit."""
+        """
+        Extract condition type, threshold value, and unit.
+
+        Handles Polymarket-specific formats:
+          "be {X}°C or higher"      → TEMPERATURE_ABOVE
+          "be {X}°C or below"       → TEMPERATURE_BELOW
+          "be {X}°C"                → TEMPERATURE_EXACT (exact temperature match)
+          "be between {X}-{Y}°F"    → TEMPERATURE_EXACT (midpoint of range)
+          "be {X}°F or higher"      → TEMPERATURE_ABOVE (converted to °C)
+          plain rain/snow/wind      → respective conditions
+        """
         q_lower = question.lower()
 
-        # Hurricane/storm
+        # ── Hurricane / tropical storm ────────────────────────────────────────
         if "hurricane" in q_lower:
             return WeatherCondition.HURRICANE, None, None
-        if any(w in q_lower for w in ["storm", "tornado", "cyclone", "typhoon"]):
+        if any(w in q_lower for w in ["tornado", "cyclone", "typhoon"]):
             return WeatherCondition.STORM, None, None
 
-        # Snow
+        # ── Temperature: "between X-Y°F/°C" range ────────────────────────────
+        m = re.search(
+            r"between\s+(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*[°]?\s*(f|c|fahrenheit|celsius)",
+            q_lower,
+        )
+        if m:
+            low = float(m.group(1))
+            high = float(m.group(2))
+            unit = "F" if m.group(3).startswith("f") else "C"
+            mid = (low + high) / 2.0
+            mid_c = (mid - 32) * 5 / 9 if unit == "F" else mid
+            half_range = (high - low) / 2.0
+            half_range_c = half_range * (5 / 9) if unit == "F" else half_range
+            # Store midpoint and half-range encoded as negative threshold (sentinel)
+            # Strategy: use TEMPERATURE_EXACT with threshold = midpoint in °C
+            return WeatherCondition.TEMPERATURE_EXACT, round(mid_c, 2), "C"
+
+        # ── Temperature: "be X°C/°F [or higher/or below/or above/or lower]" ──
+        m = re.search(
+            r"be\s+(\d+(?:\.\d+)?)\s*[°]?\s*(f|c|fahrenheit|celsius)"
+            r"(?:\s+or\s+(higher|above|lower|below))?",
+            q_lower,
+        )
+        if m:
+            val = float(m.group(1))
+            unit = "F" if m.group(2).startswith("f") else "C"
+            modifier = (m.group(3) or "").lower()
+            val_c = (val - 32) * 5 / 9 if unit == "F" else val
+
+            if modifier in ("higher", "above"):
+                return WeatherCondition.TEMPERATURE_ABOVE, round(val_c, 2), "C"
+            elif modifier in ("lower", "below"):
+                return WeatherCondition.TEMPERATURE_BELOW, round(val_c, 2), "C"
+            else:
+                # Exact match (no modifier) – e.g. "be 29°C"
+                return WeatherCondition.TEMPERATURE_EXACT, round(val_c, 2), "C"
+
+        # ── Temperature: "exceed / above / over X°C" ─────────────────────────
+        m = re.search(
+            r"(?:exceed|above|over|reach|surpass)\s+(\d+(?:\.\d+)?)\s*[°]?\s*(f|c|fahrenheit|celsius)",
+            q_lower,
+        )
+        if m:
+            val = float(m.group(1))
+            unit = "F" if m.group(2).startswith("f") else "C"
+            val_c = (val - 32) * 5 / 9 if unit == "F" else val
+            return WeatherCondition.TEMPERATURE_ABOVE, round(val_c, 2), "C"
+
+        # ── Temperature: "below / under / drop below X°C" ────────────────────
+        m = re.search(
+            r"(?:below|under|drop\s+below|fall\s+below)\s+(\d+(?:\.\d+)?)\s*[°]?\s*(f|c|fahrenheit|celsius)",
+            q_lower,
+        )
+        if m:
+            val = float(m.group(1))
+            unit = "F" if m.group(2).startswith("f") else "C"
+            val_c = (val - 32) * 5 / 9 if unit == "F" else val
+            return WeatherCondition.TEMPERATURE_BELOW, round(val_c, 2), "C"
+
+        # ── Generic temperature mention (last resort) ─────────────────────────
+        if any(w in q_lower for w in ["temperature", "degrees", "°f", "°c", "fahrenheit", "celsius"]):
+            threshold, unit = self._extract_numeric_threshold(question)
+            if any(w in q_lower for w in ["exceed", "above", "over", "high", "hot", "warm", "higher"]):
+                return WeatherCondition.TEMPERATURE_ABOVE, threshold, unit
+            return WeatherCondition.TEMPERATURE_BELOW, threshold, unit
+
+        # ── Snow ──────────────────────────────────────────────────────────────
         if any(w in q_lower for w in ["snow", "blizzard", "snowfall", "snowstorm"]):
             threshold, unit = self._extract_numeric_threshold(question)
             return WeatherCondition.SNOW, threshold, unit
 
-        # Rain / precipitation
+        # ── Rain / precipitation ──────────────────────────────────────────────
         if any(w in q_lower for w in ["rain", "rainfall", "precipitation", "wet"]):
             threshold, unit = self._extract_numeric_threshold(question)
             return WeatherCondition.RAIN, threshold, unit
 
-        # Temperature above threshold
-        temp_above = re.search(
-            r"(?:exceed|above|over|reach|surpass|high.*above|high.*over)\s+"
-            r"(\d+(?:\.\d+)?)\s*[°]?\s*(f|c|fahrenheit|celsius)",
-            q_lower,
-        )
-        if temp_above:
-            val = float(temp_above.group(1))
-            unit = "F" if temp_above.group(2).startswith("f") else "C"
-            val_c = (val - 32) * 5 / 9 if unit == "F" else val
-            return WeatherCondition.TEMPERATURE_ABOVE, val_c, "C"
+        # ── Storm ─────────────────────────────────────────────────────────────
+        if any(w in q_lower for w in ["storm", "thunder", "lightning"]):
+            return WeatherCondition.STORM, None, None
 
-        # Temperature below threshold
-        temp_below = re.search(
-            r"(?:below|under|drop.*below|fall.*below)\s+"
-            r"(\d+(?:\.\d+)?)\s*[°]?\s*(f|c|fahrenheit|celsius)",
-            q_lower,
-        )
-        if temp_below:
-            val = float(temp_below.group(1))
-            unit = "F" if temp_below.group(2).startswith("f") else "C"
-            val_c = (val - 32) * 5 / 9 if unit == "F" else val
-            return WeatherCondition.TEMPERATURE_BELOW, val_c, "C"
-
-        # Generic temperature mention
-        if any(w in q_lower for w in ["temperature", "degrees", "°f", "°c", "fahrenheit", "celsius"]):
-            # Try to figure out above/below from context
-            if any(w in q_lower for w in ["exceed", "above", "over", "high", "hot", "warm"]):
-                threshold, unit = self._extract_numeric_threshold(question)
-                return WeatherCondition.TEMPERATURE_ABOVE, threshold, unit
-            threshold, unit = self._extract_numeric_threshold(question)
-            return WeatherCondition.TEMPERATURE_BELOW, threshold, unit
-
-        # Wind
+        # ── Wind ──────────────────────────────────────────────────────────────
         if any(w in q_lower for w in ["wind", "gust", "mph", "km/h", "knots"]):
             threshold, unit = self._extract_numeric_threshold(question)
-            # Convert mph to km/h if needed
             if unit == "mph" and threshold is not None:
                 threshold = threshold * 1.60934
                 unit = "km/h"
             return WeatherCondition.WIND_ABOVE, threshold, unit
 
-        # Sunny / clear
+        # ── Sunny / clear / dry ───────────────────────────────────────────────
         if any(w in q_lower for w in ["sunny", "sun", "clear", "dry", "no rain"]):
             return WeatherCondition.SUNNY, None, None
 
@@ -269,7 +352,6 @@ class WeatherMarketParser:
         self, question: str
     ) -> tuple[Optional[float], Optional[str]]:
         """Find the first numeric value and its unit in the question."""
-        # Look for: number + optional unit
         m = re.search(
             r"(\d+(?:\.\d+)?)\s*"
             r"(mm|cm|inches?|in|°?f|°?c|fahrenheit|celsius|mph|km/h|kph|knots?)?",

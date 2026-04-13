@@ -411,6 +411,48 @@ sudo journalctl -u betbot-weather -n 100
 sudo journalctl -u betbot-weather --since today
 ```
 
+### SSH, segundo plano y cómo apagarlo
+
+Tras el setup con **`setup_ec2.sh`**, el bot **no depende de tu sesión SSH**: lo ejecuta **systemd** como servicio `betbot-weather`. Puedes conectarte, arrancarlo y **cerrar SSH**; el proceso sigue en el servidor hasta que lo detengas o reinicies la instancia (si el servicio está habilitado con `enable`, también puede volver a levantarse solo al boot).
+
+| Qué quieres | Comando (en el servidor, por SSH) |
+|---|---|
+| Dejarlo corriendo | `sudo systemctl start betbot-weather` |
+| Comprobar que sigue activo | `sudo systemctl status betbot-weather` |
+| Apagarlo | `sudo systemctl stop betbot-weather` |
+| Que arranque solo al reiniciar la EC2 | `sudo systemctl enable betbot-weather` (si aún no lo hizo el setup) |
+| Que no arranque al reiniciar la EC2 | `sudo systemctl disable betbot-weather` |
+
+Los logs van a **journald** (`journalctl -u betbot-weather -f`) y el bot también escribe en **`/opt/betbot/data/logs/bot.log`** (loguru).
+
+#### Sin systemd (prueba rápida en tu `$HOME`)
+
+Si clonaste el repo **sin** instalar el servicio y solo quieres que no muera al salir de SSH, usa **tmux** (suele venir en Ubuntu; si no: `sudo apt install tmux`):
+
+```bash
+cd ~/betbot   # o la ruta donde tengas el proyecto
+source .venv/bin/activate
+
+tmux new -s betbot
+python -m scripts.run weather --mode paper
+# Ctrl+B, luego D  →  desasocia la sesión; puedes cerrar SSH
+```
+
+Volver a ver el proceso:
+
+```bash
+tmux attach -t betbot
+# Ctrl+C  →  detiene el bot; luego exit o Ctrl+D para salir del tmux
+```
+
+O matar la sesión entera sin reattach:
+
+```bash
+tmux kill-session -t betbot
+```
+
+**No recomendado para producción:** `nohup python -m scripts.run weather --mode paper > bot.out 2>&1 &` — al apagar hay que buscar el PID con `ps aux | grep scripts.run` y `kill <pid>`.
+
 ### Instancia EC2 recomendada
 
 | Recurso | Mínimo | Suficiente para 1 bot |

@@ -8,7 +8,7 @@ In live mode, fetches from Polymarket API.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from core.models import BotMode, PortfolioState, PositionStatus
@@ -29,7 +29,7 @@ class PortfolioTracker:
         self._losing_trades = 0
         self._realized_pnl = 0.0
         self._daily_pnl = 0.0
-        self._daily_reset_date = datetime.utcnow().date()
+        self._daily_reset_date = datetime.now(timezone.utc).date()
 
     def get_state(self) -> PortfolioState:
         """Build a full portfolio snapshot."""
@@ -52,7 +52,7 @@ class PortfolioTracker:
         drawdown = (peak - total_value) / peak if peak > 0 else 0.0
 
         return PortfolioState(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             mode=self._mode,
             cash_usd=cash,
             open_positions_value_usd=open_value,
@@ -85,7 +85,7 @@ class PortfolioTracker:
         self._realized_pnl = sum(p.pnl_usd or 0 for p in closed)
 
         # Reset daily PnL if new day
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         if today != self._daily_reset_date:
             self._daily_pnl = 0.0
             self._daily_reset_date = today

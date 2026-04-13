@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 
 from loguru import logger
+
+from typing import Optional
 
 from core.models import BotMode, BotSignal, Market, PortfolioState, SignalAction
 from core.portfolio.logger import OperationsLogger
@@ -92,7 +94,7 @@ class BaseBot(ABC):
 
     def _run_cycle(self) -> None:
         """Execute one full scan-evaluate-manage cycle."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         logger.info(f"[{self.mode.value.upper()}] === Scan cycle {now} ===")
         self.logger.log_bot_event("scan_start", {"bot": self.name})
 
@@ -112,7 +114,8 @@ class BaseBot(ABC):
             for market in markets:
                 try:
                     signal = self.evaluate_market(market)
-                    self._act_on_signal(signal, state)
+                    # Pass market directly to avoid a redundant re-fetch
+                    self._act_on_signal(signal, state, market=market)
                 except Exception as exc:
                     logger.error(f"Error evaluating market {market.condition_id}: {exc}")
                     self.logger.log_bot_event(
@@ -134,21 +137,22 @@ class BaseBot(ABC):
             },
         )
 
-    def _act_on_signal(self, signal: BotSignal, state: PortfolioState) -> None:
+    def _act_on_signal(
+        self,
+        signal: BotSignal,
+        state: PortfolioState,
+        market: Optional[Market] = None,
+    ) -> None:
         """Execute an ENTER signal (SKIP and HOLD are no-ops here)."""
         if signal.action != SignalAction.ENTER:
-            if signal.action == SignalAction.SKIP:
-                self.logger.log_signal_skipped(
-                    signal.condition_id,
-                    signal.question,
-                    signal.reason,
-                    signal.edge,
-                )
             return
+
+        # Use the market passed in (avoids a redundant API call)
+        resolved_market = market or self._get_market_for_signal(signal)
 
         # Final risk gate
         allowed, reason = self.risk.check_entry_allowed(
-            market=self._get_market_for_signal(signal),
+            market=resolved_market,
             edge=signal.edge or 0.0,
             side=signal.side,
             position_size_usd=signal.position_size_usd or 0.0,
@@ -156,17 +160,11 @@ class BaseBot(ABC):
             is_trading_paused=self._trading_paused,
         )
         if not allowed:
-            self.logger.log_signal_skipped(
-                signal.condition_id,
-                signal.question,
-                f"risk gate: {reason}",
-                signal.edge,
-            )
             return
 
-        self._execute_entry(signal)
+        self._execute_entry(signal, market=resolved_market)
 
-    def _execute_entry(self, signal: BotSignal) -> None:
+    def _execute_entry(self, signal: BotSignal, market: Optional[Market] = None) -> None:
         """To be implemented by subclasses that need custom entry logic."""
         raise NotImplementedError("Subclass must implement _execute_entry")
 

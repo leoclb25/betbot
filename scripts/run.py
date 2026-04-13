@@ -13,6 +13,10 @@ Usage:
 
   # Show current balance summary
   python -m scripts.run status
+
+  # Reset paper trading state (fresh virtual balance from PAPER_INITIAL_BALANCE)
+  python -m scripts.run paper-reset -y
+  python -m scripts.run paper-reset -y --with-logs   # also clear operations / balance_summary
 """
 
 from __future__ import annotations
@@ -225,6 +229,77 @@ def operations(tail: int, event_filter: str | None) -> None:
         table.add_row(ts, event, side, amount, pnl_str, question)
 
     console.print(table)
+
+
+# ── paper-reset command ───────────────────────────────────────────────────────
+
+PAPER_STATE = Path("data/paper_portfolio.json")
+OPS_LOG = Path("data/logs/operations.jsonl")
+BALANCE_SUMMARY = Path("data/logs/balance_summary.json")
+BOT_LOG = Path("data/logs/bot.log")
+
+
+@cli.command("paper-reset")
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation (useful for scripts).",
+)
+@click.option(
+    "--with-logs",
+    is_flag=True,
+    help="Also delete data/logs/operations.jsonl and balance_summary.json.",
+)
+@click.option(
+    "--bot-log",
+    is_flag=True,
+    help="Also delete data/logs/bot.log.",
+)
+def paper_reset(yes: bool, with_logs: bool, bot_log: bool) -> None:
+    """Remove paper portfolio file so the next run starts with a fresh virtual balance."""
+    import os
+
+    to_remove: list[Path] = []
+    if PAPER_STATE.exists():
+        to_remove.append(PAPER_STATE)
+    if with_logs:
+        to_remove.extend(p for p in (OPS_LOG, BALANCE_SUMMARY) if p.exists())
+    if bot_log and BOT_LOG.exists():
+        to_remove.append(BOT_LOG)
+
+    if not to_remove:
+        console.print("[yellow]Nothing to reset: no matching files found.[/]")
+        return
+
+    if not yes:
+        preview = "\n".join(f"  • {p}" for p in to_remove)
+        if not click.confirm(f"Delete these files?\n{preview}"):
+            console.print("Aborted.")
+            raise SystemExit(0)
+
+    removed: list[str] = []
+    for p in to_remove:
+        p.unlink()
+        removed.append(str(p))
+
+    initial = os.getenv("PAPER_INITIAL_BALANCE", "100.0")
+    tail = ""
+    if PAPER_STATE in to_remove:
+        tail = (
+            f"\n\nNext [cyan]paper[/] run will start with [bold]${float(initial):.2f}[/] cash "
+            f"([dim]PAPER_INITIAL_BALANCE[/])."
+        )
+    console.print(
+        Panel(
+            f"[green]Paper reset complete.[/]\n\n"
+            f"Removed:\n"
+            + "\n".join(f"  • [dim]{r}[/]" for r in removed)
+            + tail,
+            title="[bold]paper-reset[/]",
+            box=box.ROUNDED,
+        )
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
