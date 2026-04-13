@@ -18,6 +18,7 @@ Strategy summary:
 
 from __future__ import annotations
 
+from datetime import date, timezone
 from typing import Optional
 
 from loguru import logger
@@ -34,6 +35,14 @@ from core.models import (
 )
 from core.risk.manager import RiskManager
 from core.weather.client import WeatherClient
+
+
+def _market_reference_date(market: Market) -> date:
+    """Calendar date of market resolution (UTC) for parsing month/day without year."""
+    ed = market.end_date
+    if ed.tzinfo is not None:
+        return ed.astimezone(timezone.utc).date()
+    return ed.date()
 
 
 class WeatherStrategy:
@@ -63,7 +72,11 @@ class WeatherStrategy:
         ENTER, SKIP, or HOLD.
         """
         # Step 1: Parse the market question
-        info = self._parser.parse(market.condition_id, market.question)
+        info = self._parser.parse(
+            market.condition_id,
+            market.question,
+            reference_date=_market_reference_date(market),
+        )
         if info is None or info.condition.value == "unknown":
             return BotSignal(
                 action=SignalAction.SKIP,
@@ -164,7 +177,11 @@ class WeatherStrategy:
         """
         # Re-fetch weather forecast to check thesis
         new_true_prob: Optional[float] = None
-        info = self._parser.parse(market.condition_id, market.question)
+        info = self._parser.parse(
+            market.condition_id,
+            market.question,
+            reference_date=_market_reference_date(market),
+        )
 
         if info is not None:
             forecast = self._weather.get_ensemble_forecast(

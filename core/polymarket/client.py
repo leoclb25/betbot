@@ -76,6 +76,47 @@ def _parse_market(raw: dict) -> Optional[Market]:
         return None
 
 
+def gamma_fetch_market_by_condition_id(
+    session: requests.Session, condition_id: str
+) -> Optional[dict]:
+    """
+    Fetch one market from Gamma by conditionId (0x… hex).
+
+    GET /markets/{id} expects the numeric market id, not conditionId — using the
+    hex id there returns 404. The list endpoint supports condition_ids=…
+    """
+    if not condition_id:
+        return None
+
+    # Numeric Gamma id (unusual for our codepaths, but supported)
+    if condition_id.isdigit():
+        try:
+            resp = session.get(f"{GAMMA_API}/markets/{condition_id}", timeout=15)
+            if resp.status_code == 200:
+                raw = resp.json()
+                if isinstance(raw, list):
+                    return raw[0] if raw else None
+                return raw if isinstance(raw, dict) else None
+        except requests.RequestException as exc:
+            logger.debug(f"Gamma GET /markets/{{id}} failed: {exc}")
+
+    param_sets: list[list[tuple[str, str]]] = [
+        [("condition_ids", condition_id), ("limit", "1")],
+        [("condition_ids", condition_id), ("limit", "1"), ("closed", "true")],
+    ]
+    for pairs in param_sets:
+        try:
+            resp = session.get(f"{GAMMA_API}/markets", params=pairs, timeout=15)
+            resp.raise_for_status()
+            batch = resp.json()
+        except requests.RequestException as exc:
+            logger.debug(f"Gamma markets list failed ({pairs}): {exc}")
+            continue
+        if isinstance(batch, list) and batch:
+            return batch[0]
+    return None
+
+
 class PolymarketClient:
     """
     Live Polymarket client.
@@ -175,15 +216,9 @@ class PolymarketClient:
         return markets
 
     def get_market(self, condition_id: str) -> Optional[Market]:
-        """Fetch a single market by condition ID."""
-        resp = self._session.get(f"{GAMMA_API}/markets/{condition_id}", timeout=15)
-        if resp.status_code in (404, 422):
-            return None
-        resp.raise_for_status()
-        raw = resp.json()
-        if isinstance(raw, list):
-            return _parse_market(raw[0]) if raw else None
-        return _parse_market(raw)
+        """Fetch a single market by condition ID (0x… hex)."""
+        raw = gamma_fetch_market_by_condition_id(self._session, condition_id)
+        return _parse_market(raw) if raw else None
 
     # ── Account ──────────────────────────────────────────────────────────────
 

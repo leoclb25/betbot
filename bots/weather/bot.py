@@ -12,13 +12,14 @@ Wires together:
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Union
 
 from loguru import logger
 
 from bots.base import BaseBot
 from bots.weather.strategy import WeatherStrategy
-from core.models import BotMode, BotSignal, Market, OrderSide, PortfolioState, SignalAction
+from core.models import BotMode, BotSignal, Market, OrderSide, PortfolioState, Position, SignalAction
 from core.portfolio.logger import OperationsLogger
 from core.portfolio.tracker import PortfolioTracker
 from core.polymarket.client import PolymarketClient
@@ -28,6 +29,21 @@ from core.weather.client import WeatherClient
 from bots.weather.parser import WeatherMarketParser
 
 # Default keywords to filter weather markets
+def _synthetic_market_for_orphan_position(position: Position) -> Market:
+    """When Gamma no longer returns the market, close paper at 50¢ (neutral settlement)."""
+    return Market(
+        condition_id=position.condition_id,
+        question=position.question,
+        yes_price=0.5,
+        no_price=0.5,
+        end_date=datetime.now(timezone.utc),
+        volume_usd=0.0,
+        liquidity_usd=0.0,
+        active=False,
+        closed=True,
+    )
+
+
 WEATHER_KEYWORDS = [
     "rain", "rainfall", "precipitation", "snow", "snowfall",
     "temperature", "degrees", "hurricane", "storm", "tornado",
@@ -138,7 +154,15 @@ class WeatherBot(BaseBot):
         for position in open_positions:
             market = self.client.get_market(position.condition_id)
             if market is None:
-                logger.warning(f"Market {position.condition_id} not found – skipping")
+                if isinstance(self.client, PaperClient):
+                    logger.warning(
+                        f"Market {position.condition_id} not on Gamma API — "
+                        f"closing paper position at 50¢ (resolved/delisted)"
+                    )
+                    synthetic = _synthetic_market_for_orphan_position(position)
+                    self._close_position(position, synthetic, "market not found on Gamma API")
+                else:
+                    logger.warning(f"Market {position.condition_id} not found – skipping")
                 continue
 
             # Market resolved → always close

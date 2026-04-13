@@ -17,13 +17,101 @@ Usage:
   # Reset paper trading state (fresh virtual balance from PAPER_INITIAL_BALANCE)
   python -m scripts.run paper-reset -y
   python -m scripts.run paper-reset -y --with-logs   # also clear operations / balance_summary
+
+  # paper-reset funciona también con python3 del sistema (sin venv): solo usa la stdlib
+  # antes de importar click/dotenv. Para el resto de comandos: .venv/bin/python -m scripts.run …
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
+
+# Repo root (…/betbot) — rutas de datos no dependen del cwd
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+PAPER_STATE = _REPO_ROOT / "data" / "paper_portfolio.json"
+OPS_LOG = _REPO_ROOT / "data" / "logs" / "operations.jsonl"
+BALANCE_SUMMARY = _REPO_ROOT / "data" / "logs" / "balance_summary.json"
+BOT_LOG = _REPO_ROOT / "data" / "logs" / "bot.log"
+
+
+def _read_env_key(env_path: Path, key: str) -> str | None:
+    """Leer una clave de .env sin python-dotenv (solo para paper-reset bare)."""
+    if not env_path.is_file():
+        return None
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() != key:
+            continue
+        v = v.strip().strip("'").strip('"')
+        return v if v else None
+    return None
+
+
+def _paper_reset_stdlib(argv: list[str]) -> int:
+    """paper-reset sin dependencias de terceros (útil si no activaste el venv)."""
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(prog="python -m scripts.run paper-reset")
+    parser.add_argument("-y", "--yes", action="store_true", help="No pedir confirmación")
+    parser.add_argument("--with-logs", action="store_true", help="Borrar operations.jsonl y balance_summary")
+    parser.add_argument("--bot-log", action="store_true", help="Borrar bot.log")
+    args = parser.parse_args(argv)
+
+    to_remove: list[Path] = []
+    if PAPER_STATE.exists():
+        to_remove.append(PAPER_STATE)
+    if args.with_logs:
+        to_remove.extend(p for p in (OPS_LOG, BALANCE_SUMMARY) if p.exists())
+    if args.bot_log and BOT_LOG.exists():
+        to_remove.append(BOT_LOG)
+
+    if not to_remove:
+        print("Nothing to reset: no matching files found.")
+        return 0
+
+    if not args.yes:
+        print("Delete these files?")
+        for p in to_remove:
+            print(f"  • {p}")
+        if input("y/N: ").strip().lower() not in ("y", "yes"):
+            print("Aborted.")
+            return 0
+
+    removed: list[str] = []
+    for p in to_remove:
+        p.unlink()
+        removed.append(str(p))
+
+    print("Paper reset complete. Removed:")
+    for r in removed:
+        print(f"  • {r}")
+
+    if PAPER_STATE in to_remove:
+        initial = os.environ.get("PAPER_INITIAL_BALANCE") or _read_env_key(
+            _REPO_ROOT / ".env", "PAPER_INITIAL_BALANCE"
+        ) or "100.0"
+        try:
+            bal = float(initial)
+        except ValueError:
+            bal = 100.0
+        print(f"\nNext paper run will start with ${bal:.2f} cash (PAPER_INITIAL_BALANCE).")
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "paper-reset":
+        raise SystemExit(_paper_reset_stdlib(sys.argv[2:]))
+
+import json
 
 import click
 from dotenv import load_dotenv
@@ -47,7 +135,7 @@ def _setup_logging(verbose: bool) -> None:
         colorize=True,
     )
     logger.add(
-        "data/logs/bot.log",
+        str(BOT_LOG),
         rotation="10 MB",
         retention="30 days",
         level="DEBUG",
@@ -140,7 +228,7 @@ def weather(mode: str, once: bool, interval: int | None) -> None:
 )
 def status(mode: str) -> None:
     """Show current portfolio balance summary."""
-    summary_path = Path("data/logs/balance_summary.json")
+    summary_path = BALANCE_SUMMARY
     if not summary_path.exists():
         console.print("[yellow]No balance summary found. Run the bot first.[/]")
         return
@@ -187,7 +275,7 @@ def status(mode: str) -> None:
 @click.option("--filter", "event_filter", default=None, help="Filter by event type (e.g. trade, position_open).")
 def operations(tail: int, event_filter: str | None) -> None:
     """Show recent operations log."""
-    ops_path = Path("data/logs/operations.jsonl")
+    ops_path = OPS_LOG
     if not ops_path.exists():
         console.print("[yellow]No operations log found. Run the bot first.[/]")
         return
@@ -232,11 +320,6 @@ def operations(tail: int, event_filter: str | None) -> None:
 
 
 # ── paper-reset command ───────────────────────────────────────────────────────
-
-PAPER_STATE = Path("data/paper_portfolio.json")
-OPS_LOG = Path("data/logs/operations.jsonl")
-BALANCE_SUMMARY = Path("data/logs/balance_summary.json")
-BOT_LOG = Path("data/logs/bot.log")
 
 
 @cli.command("paper-reset")

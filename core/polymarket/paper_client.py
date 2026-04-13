@@ -20,7 +20,7 @@ import requests
 from loguru import logger
 
 from core.models import BotMode, Market, OrderSide, Position, PositionStatus, Side, Trade
-from core.polymarket.client import FEE_RATE, GAMMA_API, _parse_market
+from core.polymarket.client import FEE_RATE, GAMMA_API, _parse_market, gamma_fetch_market_by_condition_id
 
 STATE_FILE = Path("data/paper_portfolio.json")
 
@@ -112,16 +112,8 @@ class PaperClient:
         return markets
 
     def get_market(self, condition_id: str) -> Optional[Market]:
-        resp = self._session.get(f"{GAMMA_API}/markets/{condition_id}", timeout=15)
-        if resp.status_code in (404, 422):
-            # 404 = not found, 422 = invalid condition_id format for this endpoint
-            return None
-        resp.raise_for_status()
-        raw = resp.json()
-        # The single-market endpoint may return a list or a dict
-        if isinstance(raw, list):
-            return _parse_market(raw[0]) if raw else None
-        return _parse_market(raw)
+        raw = gamma_fetch_market_by_condition_id(self._session, condition_id)
+        return _parse_market(raw) if raw else None
 
     # ── Account ──────────────────────────────────────────────────────────────
 

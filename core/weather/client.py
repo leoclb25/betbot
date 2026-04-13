@@ -45,9 +45,10 @@ def _env_int(key: str, default: str) -> int:
         return int(default)
 
 
-ENSEMBLE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_ENSEMBLE_MIN_INTERVAL", "1.35")
+ENSEMBLE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_ENSEMBLE_MIN_INTERVAL", "2.25")
 ENSEMBLE_MAX_RETRIES = max(1, _env_int("OPEN_METEO_ENSEMBLE_MAX_RETRIES", "6"))
-GEOCODE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_GEOCODE_MIN_INTERVAL", "0.35")
+GEOCODE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_GEOCODE_MIN_INTERVAL", "0.4")
+POST_429_COOLDOWN_SEC = _env_float("OPEN_METEO_POST_429_COOLDOWN_SEC", "22")
 
 
 def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
@@ -95,6 +96,7 @@ class WeatherClient:
         self._forecast_cache: dict[tuple, EnsembleForecast] = {}
         self._last_ensemble_request: float = 0.0
         self._last_geocode_request: float = 0.0
+        self._ensemble_cooldown_until: float = 0.0
 
     # ── Geocoding ────────────────────────────────────────────────────────────
 
@@ -150,7 +152,9 @@ class WeatherClient:
         """
         days_out = (target_date - date.today()).days
         if days_out < 0 or days_out > 7:
-            logger.warning(f"Target date {target_date} is {days_out} days out – outside range")
+            logger.debug(
+                f"Target date {target_date} is {days_out} days out – outside ensemble window (0–7)"
+            )
             return None
 
         # Check cache (round to 2 decimal places ≈ ~1km resolution)
@@ -175,6 +179,9 @@ class WeatherClient:
 
         data: Optional[dict] = None
         for attempt in range(ENSEMBLE_MAX_RETRIES):
+            now = time.monotonic()
+            if now < self._ensemble_cooldown_until:
+                time.sleep(self._ensemble_cooldown_until - now)
             elapsed = time.monotonic() - self._last_ensemble_request
             if elapsed < ENSEMBLE_MIN_INTERVAL_SEC:
                 time.sleep(ENSEMBLE_MIN_INTERVAL_SEC - elapsed)
@@ -184,6 +191,10 @@ class WeatherClient:
                 self._last_ensemble_request = time.monotonic()
 
                 if resp.status_code == 429:
+                    self._ensemble_cooldown_until = max(
+                        self._ensemble_cooldown_until,
+                        time.monotonic() + POST_429_COOLDOWN_SEC,
+                    )
                     wait = _retry_after_seconds(resp, attempt)
                     logger.warning(
                         f"Open-Meteo ensemble 429 — esperando {wait:.1f}s "

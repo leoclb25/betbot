@@ -103,7 +103,12 @@ class WeatherMarketParser:
     def __init__(self, weather_client: WeatherClient) -> None:
         self._weather = weather_client
 
-    def parse(self, condition_id: str, question: str) -> Optional[WeatherMarketInfo]:
+    def parse(
+        self,
+        condition_id: str,
+        question: str,
+        reference_date: Optional[date] = None,
+    ) -> Optional[WeatherMarketInfo]:
         """
         Parse a market question.
         Returns None if not parseable (not a weather market or no location/date found).
@@ -120,7 +125,7 @@ class WeatherMarketParser:
             logger.debug(f"Could not geocode location '{location}'")
             return None
 
-        target_date = self._extract_date(q)
+        target_date = self._extract_date(q, reference_date=reference_date)
         if target_date is None:
             logger.debug(f"Could not extract date from: '{q[:80]}'")
             return None
@@ -174,7 +179,23 @@ class WeatherMarketParser:
 
     # ── Date extraction ──────────────────────────────────────────────────────
 
-    def _extract_date(self, question: str) -> Optional[date]:
+    @staticmethod
+    def _pick_date_near_reference(month: int, day: int, reference_date: date) -> Optional[date]:
+        """Choose year so month/day is closest to Polymarket end_date (avoids +1y when we're 1 day past)."""
+        y = reference_date.year
+        candidates: list[date] = []
+        for dy in (-1, 0, 1):
+            try:
+                candidates.append(date(y + dy, month, day))
+            except ValueError:
+                continue
+        if not candidates:
+            return None
+        return min(candidates, key=lambda c: abs((c - reference_date).days))
+
+    def _extract_date(
+        self, question: str, reference_date: Optional[date] = None
+    ) -> Optional[date]:
         """Extract the target date from the question."""
         today = date.today()
         q_lower = question.lower()
@@ -189,10 +210,19 @@ class WeatherMarketParser:
             month = MONTH_MAP.get(month_str)
             if month:
                 day = int(day_str)
-                year = int(year_str) if year_str else today.year
+                if year_str:
+                    try:
+                        return date(int(year_str), month, day)
+                    except ValueError:
+                        pass
+                elif reference_date is not None:
+                    picked = self._pick_date_near_reference(month, day, reference_date)
+                    if picked is not None:
+                        return picked
+                year = today.year
                 try:
                     d = date(year, month, day)
-                    if d < today and not year_str:
+                    if d < today:
                         d = date(year + 1, month, day)
                     return d
                 except ValueError:
@@ -207,8 +237,18 @@ class WeatherMarketParser:
             month_str, day_str, year_str = m.group(1), m.group(2), m.group(3)
             month = MONTH_MAP.get(month_str)
             if month:
+                day_i = int(day_str)
+                if year_str:
+                    try:
+                        return date(int(year_str), month, day_i)
+                    except ValueError:
+                        pass
+                if reference_date is not None:
+                    picked = self._pick_date_near_reference(month, day_i, reference_date)
+                    if picked is not None:
+                        return picked
                 try:
-                    return date(int(year_str) if year_str else today.year, month, int(day_str))
+                    return date(today.year, month, day_i)
                 except ValueError:
                     pass
 
