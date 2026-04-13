@@ -19,7 +19,7 @@ Usage:
   python -m scripts.run paper-reset -y --with-logs   # also clear operations / balance_summary
 
   # paper-reset funciona también con python3 del sistema (sin venv): solo usa la stdlib
-  # antes de importar click/dotenv. Para el resto de comandos: .venv/bin/python -m scripts.run …
+  # antes de importar click/dotenv. Si data/ es de betbot: sudo python3 -m scripts.run paper-reset …
 """
 
 from __future__ import annotations
@@ -88,8 +88,20 @@ def _paper_reset_stdlib(argv: list[str]) -> int:
 
     removed: list[str] = []
     for p in to_remove:
-        p.unlink()
-        removed.append(str(p))
+        try:
+            p.unlink()
+            removed.append(str(p))
+        except PermissionError:
+            print(
+                f"Permission denied: {p}\n\n"
+                "Si el setup dejó data/ con dueño betbot, ubuntu no puede borrarlo.\n"
+                "Ejecutá el mismo comando con sudo, por ejemplo:\n"
+                "  sudo python3 -m scripts.run paper-reset -y --with-logs --bot-log\n\n"
+                "O como betbot (sin cambiar dueños):\n"
+                "  sudo -u betbot rm -f data/paper_portfolio.json data/logs/operations.jsonl "
+                "data/logs/balance_summary.json data/logs/bot.log"
+            )
+            return 1
 
     print("Paper reset complete. Removed:")
     for r in removed:
@@ -363,8 +375,16 @@ def paper_reset(yes: bool, with_logs: bool, bot_log: bool) -> None:
 
     removed: list[str] = []
     for p in to_remove:
-        p.unlink()
-        removed.append(str(p))
+        try:
+            p.unlink()
+            removed.append(str(p))
+        except PermissionError:
+            console.print(
+                "[red]Permission denied[/] al borrar "
+                f"[dim]{p}[/]. Probá con [bold]sudo[/] o borrá como [bold]betbot[/]:\n"
+                "[dim]sudo python3 -m scripts.run paper-reset -y --with-logs --bot-log[/]"
+            )
+            raise SystemExit(1)
 
     initial = os.getenv("PAPER_INITIAL_BALANCE", "100.0")
     tail = ""
