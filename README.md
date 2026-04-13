@@ -290,9 +290,11 @@ ssh -i tu-key.pem ubuntu@<IP_PUBLICA_EC2>
 
 ### Paso 3 — Tener el repo en el servidor (sin `/opt`)
 
-Todo queda en la carpeta del repositorio (por ejemplo `~/betbot`). El servicio systemd usa esa ruta como `WorkingDirectory`.
+Todo queda en la carpeta del repositorio. El servicio systemd usa esa ruta como `WorkingDirectory`.
 
-**Opción A: clonar en el home de `ubuntu` (recomendado)**
+**Permisos (importante):** el proceso corre como usuario del sistema **`betbot`**, no como `ubuntu`. En Ubuntu, `/home/ubuntu` suele ser `drwxr-x---` (750), así que **`betbot` no puede entrar** a `/home/ubuntu/betbot` aunque el repo sea suyo. El script **`setup_ec2.sh`** aplica **`chmod o+x /home/ubuntu`** (solo recorrido, no listado) cuando hace falta. Otra opción es instalar bajo **`/home/betbot/betbot`** (p. ej. solo con `BETBOT_REPO_URL` y el script actual).
+
+**Opción A: clonar en el home de `ubuntu`**
 ```bash
 # En el servidor
 cd ~
@@ -309,13 +311,14 @@ ssh -i tu-key.pem ubuntu@<IP_EC2>
 cd ~/betbot
 ```
 
-**Opción C: descargar solo `setup_ec2.sh` y que clone el repo** (por defecto en `/home/ubuntu/betbot` si hiciste `sudo` como `ubuntu`):
+**Opción C: descargar solo `setup_ec2.sh` y que clone el repo** (por defecto en **`/home/betbot/betbot`**, accesible para el usuario del servicio):
 
 ```bash
 wget -O setup_ec2.sh "https://raw.githubusercontent.com/tu-usuario/betbot/main/deploy/setup_ec2.sh"
 chmod +x setup_ec2.sh
 sudo BETBOT_REPO_URL="https://github.com/tu-usuario/betbot.git" ./setup_ec2.sh
-# Otra ruta: sudo BETBOT_REPO_URL="..." BETBOT_INSTALL_DIR=/home/ubuntu/mi-betbot ./setup_ec2.sh
+# Otra ruta explícita (si ponés el repo bajo /home/ubuntu, el script ajusta o+x al padre):
+# sudo BETBOT_REPO_URL="..." BETBOT_INSTALL_DIR=/home/ubuntu/mi-betbot ./setup_ec2.sh
 ```
 
 Lo habitual en EC2 es la **opción A** (clonar y `cd` al repo) o **B**.
@@ -332,7 +335,7 @@ sudo ./deploy/setup_ec2.sh
 
 Variables opcionales:
 - **`BETBOT_INSTALL_DIR`** — raíz del repo si no es el directorio desde el que corre el script (debe contener `deploy/betbot-weather.service`).
-- **`BETBOT_REPO_URL`** — clonar desde git; si no defines `BETBOT_INSTALL_DIR`, se usa `~/betbot` del usuario que hizo `sudo` (p. ej. `ubuntu`).
+- **`BETBOT_REPO_URL`** — clonar desde git; si no defines `BETBOT_INSTALL_DIR`, el destino por defecto es **`/home/betbot/betbot`**.
 
 El script hace automáticamente:
 - Instala Python 3.11
@@ -343,6 +346,8 @@ El script hace automáticamente:
 - Configura logrotate para los archivos de log
 
 Al terminar verás la ruta exacta del repo y los siguientes pasos.
+
+Si el setup falla con **`Permission denied`** al crear **`.venv`** bajo `/home/ubuntu/`, es el recorrido `750` del home de `ubuntu`: **`sudo chmod o+x /home/ubuntu`**, borrá un `.venv` a medias si quedó (`sudo rm -rf .venv`) y volvé a ejecutar **`sudo ./deploy/setup_ec2.sh`** (el script actual también hace ese `chmod` solo).
 
 ### Paso 5 — Configurar el .env en el servidor
 

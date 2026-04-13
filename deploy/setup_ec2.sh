@@ -9,7 +9,7 @@
 #
 # El directorio de instalación es la raíz del repositorio (no se usa /opt).
 #   BETBOT_INSTALL_DIR=/ruta/al/repo — otra raíz del repo (debe existir deploy/)
-#   BETBOT_REPO_URL=https://...     — clonar; destino = BETBOT_INSTALL_DIR o ~/betbot del usuario sudo
+#   BETBOT_REPO_URL=https://...     — clonar; destino = BETBOT_INSTALL_DIR o /home/betbot/betbot
 #
 # Qué hace:
 #   1. Actualiza el sistema
@@ -40,15 +40,14 @@ BETBOT_UNIX_HOME="/home/${SERVICE_USER}"
 PYTHON_VERSION="3.11"
 
 # Sin BETBOT_REPO_URL: se usa el repo donde está este script (o BETBOT_INSTALL_DIR).
-# Con BETBOT_REPO_URL: destino del clone = BETBOT_INSTALL_DIR o ~/betbot del usuario que invocó sudo.
+# Con BETBOT_REPO_URL: destino = BETBOT_INSTALL_DIR o /home/betbot/betbot (no usar /home/ubuntu/betbot:
+# el usuario del servicio no puede atravesar /home/ubuntu si el home está en 750).
 if [[ -n "$REPO_URL" ]]; then
     if [[ -n "${BETBOT_INSTALL_DIR:-}" ]]; then
         INSTALL_DIR="$BETBOT_INSTALL_DIR"
     else
-        SUDOER_HOME="$(getent passwd "${SUDO_USER:-ubuntu}" 2>/dev/null | cut -d: -f6 || true)"
-        [[ -n "$SUDOER_HOME" ]] || err "Definí BETBOT_INSTALL_DIR=... o ejecutá con sudo desde un usuario con home (p. ej. ubuntu)"
-        INSTALL_DIR="${SUDOER_HOME}/betbot"
-        warn "Clonando en $INSTALL_DIR (definí BETBOT_INSTALL_DIR para otra ruta)"
+        INSTALL_DIR="${BETBOT_UNIX_HOME}/betbot"
+        log "Clonando en $INSTALL_DIR (definí BETBOT_INSTALL_DIR= para otra ruta)"
     fi
 else
     INSTALL_DIR="${BETBOT_INSTALL_DIR:-$DEFAULT_REPO}"
@@ -123,6 +122,25 @@ fi
 log "Creando directorios de datos..."
 mkdir -p "$INSTALL_DIR/data/logs"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/data"
+
+# ── 5b. Recorrido hasta el repo (evita fallo si el repo está bajo /home/ubuntu/...) ──
+# En Ubuntu, /home/ubuntu suele ser 750: el usuario del servicio no puede entrar aunque sea dueño de ~/betbot.
+ensure_service_user_reaches_repo() {
+    local d
+    d=$(dirname "$INSTALL_DIR")
+    while [[ "$d" != "/" && "$d" != "/home" ]]; do
+        if [[ "$d" == /home/* ]] && ! sudo -u "$SERVICE_USER" test -x "$d" 2>/dev/null; then
+            log "chmod o+x $d (recorrido para usuario $SERVICE_USER hasta el repo)"
+            chmod o+x "$d"
+        fi
+        d=$(dirname "$d")
+    done
+    if ! sudo -u "$SERVICE_USER" test -w "$INSTALL_DIR" 2>/dev/null; then
+        err "El usuario $SERVICE_USER no puede escribir en $INSTALL_DIR. " \
+            "Cloná en ${BETBOT_UNIX_HOME}/betbot o definí BETBOT_INSTALL_DIR con una ruta accesible."
+    fi
+}
+ensure_service_user_reaches_repo
 
 # ── 6. Crear entorno virtual e instalar dependencias ────────────────────────
 VENV_DIR="$INSTALL_DIR/.venv"
