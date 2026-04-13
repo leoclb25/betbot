@@ -413,7 +413,28 @@ sudo -u betbot .venv/bin/pip install -e . -q
 sudo systemctl start betbot-weather
 ```
 
-Si solo cambiaron archivos `.py` sin tocar dependencias, en la práctica a veces alcanza con **`git pull`** + **`sudo systemctl restart betbot-weather`**; usar **`pip install -e .`** (o `manage.sh update`) cuando cambie **`pyproject.toml`** o el entorno.
+Si solo cambiaron archivos `.py` sin tocar dependencias, podés hacer **`sudo -u betbot git pull`** + **`sudo systemctl restart betbot-weather`** (no uses `git pull` solo como `ubuntu`: el `setup` dejó el repo con dueño **`betbot`** y `.git/` no es escribible por `ubuntu`).
+
+#### Git: `dubious ownership` o `FETCH_HEAD: Permission denied`
+
+Tras **`setup_ec2.sh`**, el directorio del repo suele ser **`betbot:betbot`**. Como usuario **`ubuntu`**:
+
+1. **`fatal: detected dubious ownership`** — Git 2.35+ bloquea repos de otro dueño. Una vez (como `ubuntu`):
+
+   ```bash
+   git config --global --add safe.directory /home/ubuntu/betbot
+   ```
+
+   (Ajustá la ruta si el repo no está ahí.)
+
+2. **`error: cannot open '.git/FETCH_HEAD': Permission denied`** — Es normal: **`git pull` debe ejecutarlo el dueño del repo**:
+
+   ```bash
+   cd ~/betbot
+   sudo -u betbot git pull
+   ```
+
+   O usá **`./deploy/manage.sh update`**, que hace `pull` como `betbot`, reinstala el editable y reinicia el servicio.
 
 ---
 

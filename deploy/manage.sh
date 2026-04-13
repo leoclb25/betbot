@@ -135,7 +135,7 @@ case "$CMD" in
         echo "  balance       – Ver balance del portfolio"
         echo "  operations N  – Ver últimas N operaciones (default 30)"
         echo "  scan-once     – Correr un ciclo manual (detiene y reinicia el servicio)"
-        echo "  update        – Actualizar código desde git y reiniciar"
+        echo "  update        – git pull como usuario betbot + pip install -e + restart (no uses git pull como ubuntu)"
         echo "  enable        – Habilitar arranque automático con el servidor"
         echo "  disable       – Deshabilitar arranque automático"
         exit 1
