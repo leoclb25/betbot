@@ -123,14 +123,14 @@ case "$CMD" in
 
     reset-paper)
         # Resetear portfolio paper (empieza de cero)
-        warn "Reseteando portfolio paper..."
+        warn "Reseteando portfolio paper y logs..."
         RUNNING=false
         if sudo systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
             RUNNING=true
             sudo systemctl stop "$SERVICE"
         fi
         cd "$INSTALL_DIR"
-        "$PYTHON" -m scripts.run paper-reset -y
+        "$PYTHON" -m scripts.run paper-reset -y --with-logs --bot-log
         if $RUNNING; then
             sudo systemctl start "$SERVICE"
         fi

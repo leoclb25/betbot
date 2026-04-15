@@ -151,6 +151,10 @@ class WeatherClient:
           - wind: max over 24h
         """
         days_out = (target_date - date.today()).days
+        # days_out=-1 puede pasar cuando el end_date del mercado es medianoche UTC
+        # y el target_date se parsea como "ayer". Tratamos -1 como día 0 (hoy).
+        if days_out == -1:
+            days_out = 0
         if days_out < 0 or days_out > 7:
             logger.debug(
                 f"Target date {target_date} is {days_out} days out – outside ensemble window (0–7)"
@@ -291,6 +295,8 @@ class WeatherClient:
     ) -> Optional[EnsembleForecast]:
         """Use deterministic forecast API as fallback (single member)."""
         days_out = (target_date - date.today()).days
+        if days_out == -1:
+            days_out = 0
         params = {
             "latitude": latitude,
             "longitude": longitude,
