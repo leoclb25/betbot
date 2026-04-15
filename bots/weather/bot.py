@@ -121,12 +121,21 @@ class WeatherBot(BaseBot):
 
         all_markets = self.client.get_markets(keywords=self._keywords, limit=200)
 
-        # Filter by resolution window and liquidity
+        # Build set of already-open questions to avoid duplicate bets on same
+        # event listed under different condition_ids
+        open_questions = {
+            p.question.strip().lower()
+            for p in self.client.get_positions()
+            if p.status.value == "OPEN"
+        }
+
+        # Filter by resolution window, liquidity, price range, and no duplicates
         filtered = [
             m for m in all_markets
             if min_days <= m.days_to_resolution <= max_days
             and m.liquidity_usd >= self.risk.params.min_liquidity_usd
             and m.condition_id not in self._open_condition_ids
+            and m.question.strip().lower() not in open_questions
         ]
 
         logger.debug(
