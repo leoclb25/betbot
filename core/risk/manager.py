@@ -49,6 +49,8 @@ class RiskParams:
     take_profit_pct: float       # exit early when profit hits this fraction
     min_position_usd: float      # minimum position size (below this, fees not worth it)
     min_liquidity_usd: float     # minimum market liquidity to trade
+    min_market_price: float      # minimum price on either side (filters broken/dead markets)
+    max_market_price: float      # maximum price on either side (= 1 - min_market_price)
 
 
 def load_risk_params() -> RiskParams:
@@ -64,6 +66,8 @@ def load_risk_params() -> RiskParams:
         take_profit_pct=_env_float("TAKE_PROFIT_PCT", 0.40),
         min_position_usd=_env_float("MIN_POSITION_USD", 5.0),
         min_liquidity_usd=_env_float("MIN_LIQUIDITY_USD", 500.0),
+        min_market_price=_env_float("MIN_MARKET_PRICE", 0.05),
+        max_market_price=_env_float("MAX_MARKET_PRICE", 0.95),
     )
 
 
@@ -170,6 +174,14 @@ class RiskManager:
             return False, (
                 f"insufficient liquidity (${market.liquidity_usd:.0f} < "
                 f"${self.params.min_liquidity_usd:.0f})"
+            )
+
+        # Precio fuera de rango → mercado roto o sin liquidez real
+        # (ej. YES=0.0005 o YES=0.999 indica precio muerto, nadie opera ahí)
+        if market.yes_price < self.params.min_market_price or market.yes_price > self.params.max_market_price:
+            return False, (
+                f"market price out of range (yes={market.yes_price:.4f}, "
+                f"valid range [{self.params.min_market_price:.2f}, {self.params.max_market_price:.2f}])"
             )
 
         if edge < self.params.min_edge:
