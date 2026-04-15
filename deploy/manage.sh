@@ -146,26 +146,42 @@ case "$CMD" in
         warn "Arranque automático deshabilitado."
         ;;
 
-    help|*)
+    help)
         echo ""
-        echo -e "${BOLD}BetBot — Comandos disponibles${NC}"
+        echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}║               BetBot — Comandos disponibles                 ║${NC}"
+        echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "  ${GREEN}./deploy/manage.sh start${NC}           Iniciar el bot en segundo plano"
-        echo -e "  ${GREEN}./deploy/manage.sh stop${NC}            Detener el bot"
-        echo -e "  ${GREEN}./deploy/manage.sh restart${NC}         Reiniciar (ej. después de cambiar .env)"
-        echo -e "  ${GREEN}./deploy/manage.sh status${NC}          Estado del servicio + últimos logs"
-        echo -e "  ${GREEN}./deploy/manage.sh logs${NC}            Ver logs en tiempo real (Ctrl+C para salir)"
-        echo -e "  ${GREEN}./deploy/manage.sh logs-n 100${NC}      Ver últimas 100 líneas"
+        echo -e "${BOLD}  SERVICIO${NC}"
+        echo -e "  ${GREEN}start${NC}                  Iniciar el bot en segundo plano"
+        echo -e "  ${GREEN}stop${NC}                   Detener el bot"
+        echo -e "  ${GREEN}restart${NC}                Reiniciar (ej. después de cambiar .env)"
+        echo -e "  ${GREEN}status${NC}                 Estado del servicio + últimas líneas de log"
+        echo -e "  ${GREEN}enable${NC}                 Arrancar automáticamente al iniciar el servidor"
+        echo -e "  ${GREEN}disable${NC}                Quitar el arranque automático"
         echo ""
-        echo -e "  ${GREEN}./deploy/manage.sh update${NC}          git pull + reinstalar deps + reiniciar"
-        echo -e "  ${GREEN}./deploy/manage.sh scan-once${NC}       Un ciclo manual (para probar)"
-        echo -e "  ${GREEN}./deploy/manage.sh scan-once live${NC}  Un ciclo manual en modo live"
+        echo -e "${BOLD}  LOGS${NC}"
+        echo -e "  ${GREEN}logs${NC}                   Ver logs en tiempo real  (Ctrl+C para salir)"
+        echo -e "  ${GREEN}logs-n 100${NC}             Ver últimas 100 líneas"
         echo ""
-        echo -e "  ${GREEN}./deploy/manage.sh balance${NC}         Ver balance del portfolio"
-        echo -e "  ${GREEN}./deploy/manage.sh operations${NC}      Ver últimas 30 operaciones"
-        echo -e "  ${GREEN}./deploy/manage.sh operations 50${NC}   Ver últimas 50 operaciones"
+        echo -e "${BOLD}  PORTFOLIO${NC}"
+        echo -e "  ${GREEN}balance${NC}                Balance actual + posiciones abiertas"
+        echo -e "  ${GREEN}operations${NC}             Últimas 30 operaciones"
+        echo -e "  ${GREEN}operations 50${NC}          Últimas 50 operaciones"
         echo ""
-        echo -e "  ${GREEN}./deploy/manage.sh reset-paper${NC}     Resetear portfolio paper a cero"
+        echo -e "${BOLD}  DESARROLLO / MANTENIMIENTO${NC}"
+        echo -e "  ${GREEN}update${NC}                 git pull + reinstalar deps + reiniciar"
+        echo -e "  ${GREEN}scan-once${NC}              Un ciclo manual en modo paper (para probar)"
+        echo -e "  ${GREEN}scan-once live${NC}         Un ciclo manual en modo live"
+        echo -e "  ${GREEN}reset-paper${NC}            Borrar portfolio paper y todos los logs (cero)"
         echo ""
+        echo -e "  Uso: ${BOLD}./deploy/manage.sh <comando>${NC}"
+        echo ""
+        ;;
+
+    *)
+        echo -e "${RED}✗${NC} Comando desconocido: '$CMD'"
+        echo -e "  Ejecuta ${BOLD}./deploy/manage.sh help${NC} para ver los comandos disponibles."
+        exit 1
         ;;
 esac
