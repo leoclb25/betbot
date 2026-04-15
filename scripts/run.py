@@ -279,6 +279,61 @@ def status(mode: str) -> None:
 
     console.print(table)
 
+    # ── Open positions detail ─────────────────────────────────────────────────
+    if PAPER_STATE.exists():
+        with PAPER_STATE.open() as f:
+            portfolio = json.load(f)
+
+        open_pos = [
+            p for p in portfolio.get("positions", {}).values()
+            if p.get("status") == "OPEN"
+        ]
+
+        if open_pos:
+            pos_table = Table(
+                title="Open Positions — P&L at entry price (last known)",
+                box=box.SIMPLE,
+            )
+            pos_table.add_column("Side", width=5)
+            pos_table.add_column("Entry $", justify="right", width=9)
+            pos_table.add_column("Entry P", justify="right", width=8)
+            pos_table.add_column("Shares", justify="right", width=8)
+            pos_table.add_column("Cur Val*", justify="right", width=9)
+            pos_table.add_column("Unreal P&L*", justify="right", width=12)
+            pos_table.add_column("Edge", justify="right", width=7)
+            pos_table.add_column("Question", overflow="fold")
+
+            FEE = 0.02
+            for p in open_pos:
+                entry_amt = p.get("entry_amount_usd", 0)
+                entry_price = p.get("entry_price", 0)
+                shares = p.get("shares", 0)
+                side = p.get("side", "?")
+                # Current value using entry_price (last known price)
+                # Gross proceeds if we sell now at entry_price
+                gross = shares * entry_price
+                net = gross * (1 - FEE)
+                unreal_pnl = net - entry_amt
+                unreal_color = "green" if unreal_pnl >= 0 else "red"
+                unreal_sign = "+" if unreal_pnl >= 0 else ""
+                edge = p.get("entry_edge", 0)
+
+                pos_table.add_row(
+                    side,
+                    f"${entry_amt:.2f}",
+                    f"{entry_price:.3f}",
+                    f"{shares:.3f}",
+                    f"${gross:.2f}",
+                    f"[{unreal_color}]{unreal_sign}${unreal_pnl:.2f}[/{unreal_color}]",
+                    f"{edge*100:.1f}%",
+                    p.get("question", "")[:60],
+                )
+
+            console.print(pos_table)
+            console.print(
+                "[dim]* Estimated using entry price — run bot cycle for live prices[/dim]"
+            )
+
 
 # ── operations command ────────────────────────────────────────────────────────
 

@@ -94,9 +94,8 @@ class BaseBot(ABC):
 
     def _run_cycle(self) -> None:
         """Execute one full scan-evaluate-manage cycle."""
-        now = datetime.now(timezone.utc).isoformat()
-        logger.info(f"[{self.mode.value.upper()}] === Scan cycle {now} ===")
-        self.logger.log_bot_event("scan_start", {"bot": self.name})
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        logger.debug(f"[{self.mode.value.upper()}] Scan cycle {now}")
 
         # 1. Portfolio health check
         state = self.tracker.get_state()
@@ -109,7 +108,6 @@ class BaseBot(ABC):
         # 3. Scan for new opportunities (if not paused)
         if not self._trading_paused:
             markets = self.scan_markets()
-            logger.info(f"Found {len(markets)} candidate markets")
 
             for market in markets:
                 try:
@@ -128,14 +126,17 @@ class BaseBot(ABC):
         # 4. Final portfolio snapshot
         final_state = self.tracker.get_state()
         self.logger.update_balance_summary(final_state)
-        self.logger.log_bot_event(
-            "scan_end",
-            {
-                "bot": self.name,
-                "total_value_usd": round(final_state.total_value_usd, 2),
-                "open_positions": final_state.open_position_count,
-            },
-        )
+
+        # Only log summary if there are open positions or portfolio changed
+        if final_state.open_position_count > 0 or final_state.total_trades > 0:
+            pnl_sign = "+" if final_state.total_pnl_usd >= 0 else ""
+            logger.info(
+                f"[{self.mode.value.upper()}] Cycle | "
+                f"open={final_state.open_position_count} | "
+                f"cash=${final_state.cash_usd:.2f} | "
+                f"total=${final_state.total_value_usd:.2f} | "
+                f"P&L={pnl_sign}${final_state.total_pnl_usd:.2f}"
+            )
 
     def _act_on_signal(
         self,

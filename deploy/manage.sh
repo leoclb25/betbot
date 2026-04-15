@@ -1,143 +1,171 @@
 #!/usr/bin/env bash
 # =============================================================================
-# manage.sh
-# Script de gestión del bot en producción (sin Docker).
-# Útil para operaciones rápidas desde SSH sin recordar los comandos systemd.
+# manage.sh — Gestión del bot en EC2
 #
-# Uso:
-#   ./deploy/manage.sh status
+# Uso desde la raíz del repo:
 #   ./deploy/manage.sh start
 #   ./deploy/manage.sh stop
 #   ./deploy/manage.sh restart
-#   ./deploy/manage.sh logs
+#   ./deploy/manage.sh update       ← git pull + reinstalar + reiniciar
+#   ./deploy/manage.sh logs         ← ver logs en tiempo real
+#   ./deploy/manage.sh status
 #   ./deploy/manage.sh balance
 #   ./deploy/manage.sh operations
-#   ./deploy/manage.sh update
+#   ./deploy/manage.sh scan-once    ← un ciclo manual para probar
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SERVICE_NAME="betbot-weather"
-VENV_PYTHON="$INSTALL_DIR/.venv/bin/python"
-BOT_USER="betbot"
+SERVICE="betbot-weather"
+PYTHON="$INSTALL_DIR/.venv/bin/python"
 
-GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
 log()  { echo -e "${GREEN}▶${NC} $*"; }
 warn() { echo -e "${YELLOW}⚠${NC} $*"; }
 err()  { echo -e "${RED}✗${NC} $*"; exit 1; }
 
-CMD="${1:-status}"
+[[ -f "$PYTHON" ]] || err "Venv no encontrado en $INSTALL_DIR/.venv — corre setup_ec2.sh primero"
+
+CMD="${1:-help}"
 
 case "$CMD" in
 
-    status)
-        echo ""
-        systemctl status "$SERVICE_NAME" --no-pager
-        echo ""
-        log "Último ciclo de logs:"
-        journalctl -u "$SERVICE_NAME" -n 20 --no-pager
-        ;;
-
     start)
-        log "Iniciando $SERVICE_NAME..."
-        sudo systemctl start "$SERVICE_NAME"
-        sleep 2
-        systemctl status "$SERVICE_NAME" --no-pager
+        log "Iniciando $SERVICE..."
+        sudo systemctl start "$SERVICE"
+        sleep 1
+        sudo systemctl status "$SERVICE" --no-pager -l
         ;;
 
     stop)
-        warn "Deteniendo $SERVICE_NAME..."
-        sudo systemctl stop "$SERVICE_NAME"
-        log "Servicio detenido."
+        warn "Deteniendo $SERVICE..."
+        sudo systemctl stop "$SERVICE"
+        log "Bot detenido."
         ;;
 
     restart)
-        warn "Reiniciando $SERVICE_NAME..."
-        sudo systemctl restart "$SERVICE_NAME"
-        sleep 2
-        systemctl status "$SERVICE_NAME" --no-pager
+        warn "Reiniciando $SERVICE..."
+        sudo systemctl restart "$SERVICE"
+        sleep 1
+        sudo systemctl status "$SERVICE" --no-pager -l
+        ;;
+
+    status)
+        sudo systemctl status "$SERVICE" --no-pager -l
+        echo ""
+        log "Últimas 15 líneas de log:"
+        sudo journalctl -u "$SERVICE" -n 15 --no-pager
         ;;
 
     logs)
-        # Ver logs en tiempo real (Ctrl+C para salir)
-        log "Logs en tiempo real (Ctrl+C para salir):"
-        journalctl -u "$SERVICE_NAME" -f
+        log "Logs en tiempo real — Ctrl+C para salir"
+        sudo journalctl -u "$SERVICE" -f
         ;;
 
-    logs-tail)
+    logs-n)
         N="${2:-50}"
-        journalctl -u "$SERVICE_NAME" -n "$N" --no-pager
+        sudo journalctl -u "$SERVICE" -n "$N" --no-pager
         ;;
 
     balance)
         log "Balance del portfolio:"
         cd "$INSTALL_DIR"
-        sudo -u "$BOT_USER" "$VENV_PYTHON" -m scripts.run status
+        "$PYTHON" -m scripts.run status
         ;;
 
     operations)
         N="${2:-30}"
         log "Últimas $N operaciones:"
         cd "$INSTALL_DIR"
-        sudo -u "$BOT_USER" "$VENV_PYTHON" -m scripts.run operations --tail "$N"
+        "$PYTHON" -m scripts.run operations --tail "$N"
         ;;
 
     scan-once)
-        # Correr un ciclo manual sin el servicio (útil para debugging)
+        # Corre un ciclo manual. Detiene el servicio si está corriendo.
         MODE="${2:-paper}"
-        warn "Corriendo un ciclo manual en modo $MODE..."
-        sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        RUNNING=false
+        if sudo systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+            RUNNING=true
+            warn "Deteniendo servicio para correr ciclo manual..."
+            sudo systemctl stop "$SERVICE"
+        fi
+
+        log "Corriendo un ciclo en modo $MODE (con verbose)..."
         cd "$INSTALL_DIR"
-        sudo -u "$BOT_USER" "$VENV_PYTHON" -m scripts.run --verbose weather --mode "$MODE" --once
-        log "Ciclo completado. Reiniciando servicio..."
-        sudo systemctl start "$SERVICE_NAME"
+        "$PYTHON" -m scripts.run --verbose weather --mode "$MODE" --once
+
+        if $RUNNING; then
+            log "Reiniciando servicio..."
+            sudo systemctl start "$SERVICE"
+        fi
         ;;
 
     update)
-        # Actualizar código desde git y reiniciar
+        # git pull (como el usuario actual) + reinstalar deps + reiniciar
+        log "Deteniendo servicio..."
+        sudo systemctl stop "$SERVICE" 2>/dev/null || true
+
         log "Actualizando código..."
-        sudo systemctl stop "$SERVICE_NAME"
         cd "$INSTALL_DIR"
-        sudo -u "$BOT_USER" git pull
-        sudo -u "$BOT_USER" "$INSTALL_DIR/.venv/bin/pip" install -e . -q
-        sudo systemctl start "$SERVICE_NAME"
-        sleep 2
-        systemctl status "$SERVICE_NAME" --no-pager
+        git pull
+
+        log "Reinstalando dependencias..."
+        "$INSTALL_DIR/.venv/bin/pip" install -e . -q
+
+        log "Iniciando servicio..."
+        sudo systemctl start "$SERVICE"
+        sleep 1
+        sudo systemctl status "$SERVICE" --no-pager -l
         log "Actualización completa."
         ;;
 
+    reset-paper)
+        # Resetear portfolio paper (empieza de cero)
+        warn "Reseteando portfolio paper..."
+        RUNNING=false
+        if sudo systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+            RUNNING=true
+            sudo systemctl stop "$SERVICE"
+        fi
+        cd "$INSTALL_DIR"
+        "$PYTHON" -m scripts.run paper-reset -y
+        if $RUNNING; then
+            sudo systemctl start "$SERVICE"
+        fi
+        ;;
+
     enable)
-        log "Habilitando arranque automático..."
-        sudo systemctl enable "$SERVICE_NAME"
+        sudo systemctl enable "$SERVICE"
+        log "Arranque automático habilitado."
         ;;
 
     disable)
-        warn "Deshabilitando arranque automático..."
-        sudo systemctl disable "$SERVICE_NAME"
+        sudo systemctl disable "$SERVICE"
+        warn "Arranque automático deshabilitado."
         ;;
 
-    tail-log-file)
-        # Ver el archivo de log del bot (distinto del journal de systemd)
-        tail -f "$INSTALL_DIR/data/logs/bot.log"
-        ;;
-
-    *)
-        echo "Uso: $0 {status|start|stop|restart|logs|balance|operations|scan-once|update}"
+    help|*)
         echo ""
-        echo "  status        – Estado del servicio + últimos logs"
-        echo "  start         – Iniciar el bot"
-        echo "  stop          – Detener el bot"
-        echo "  restart       – Reiniciar el bot (ej. después de cambiar .env)"
-        echo "  logs          – Ver logs en tiempo real (Ctrl+C para salir)"
-        echo "  logs-tail N   – Ver últimas N líneas de logs (default 50)"
-        echo "  balance       – Ver balance del portfolio"
-        echo "  operations N  – Ver últimas N operaciones (default 30)"
-        echo "  scan-once     – Correr un ciclo manual (detiene y reinicia el servicio)"
-        echo "  update        – git pull como usuario betbot + pip install -e + restart (no uses git pull como ubuntu)"
-        echo "  enable        – Habilitar arranque automático con el servidor"
-        echo "  disable       – Deshabilitar arranque automático"
-        exit 1
+        echo -e "${BOLD}BetBot — Comandos disponibles${NC}"
+        echo ""
+        echo -e "  ${GREEN}./deploy/manage.sh start${NC}           Iniciar el bot en segundo plano"
+        echo -e "  ${GREEN}./deploy/manage.sh stop${NC}            Detener el bot"
+        echo -e "  ${GREEN}./deploy/manage.sh restart${NC}         Reiniciar (ej. después de cambiar .env)"
+        echo -e "  ${GREEN}./deploy/manage.sh status${NC}          Estado del servicio + últimos logs"
+        echo -e "  ${GREEN}./deploy/manage.sh logs${NC}            Ver logs en tiempo real (Ctrl+C para salir)"
+        echo -e "  ${GREEN}./deploy/manage.sh logs-n 100${NC}      Ver últimas 100 líneas"
+        echo ""
+        echo -e "  ${GREEN}./deploy/manage.sh update${NC}          git pull + reinstalar deps + reiniciar"
+        echo -e "  ${GREEN}./deploy/manage.sh scan-once${NC}       Un ciclo manual (para probar)"
+        echo -e "  ${GREEN}./deploy/manage.sh scan-once live${NC}  Un ciclo manual en modo live"
+        echo ""
+        echo -e "  ${GREEN}./deploy/manage.sh balance${NC}         Ver balance del portfolio"
+        echo -e "  ${GREEN}./deploy/manage.sh operations${NC}      Ver últimas 30 operaciones"
+        echo -e "  ${GREEN}./deploy/manage.sh operations 50${NC}   Ver últimas 50 operaciones"
+        echo ""
+        echo -e "  ${GREEN}./deploy/manage.sh reset-paper${NC}     Resetear portfolio paper a cero"
+        echo ""
         ;;
 esac

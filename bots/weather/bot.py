@@ -129,7 +129,7 @@ class WeatherBot(BaseBot):
             and m.condition_id not in self._open_condition_ids
         ]
 
-        logger.info(
+        logger.debug(
             f"[WEATHER] {len(all_markets)} raw → {len(filtered)} after filters "
             f"(resolution {min_days}-{max_days} days, liq≥${self.risk.params.min_liquidity_usd:.0f})"
         )
@@ -146,31 +146,38 @@ class WeatherBot(BaseBot):
         open_positions = [p for p in positions if p.status.value == "OPEN"]
 
         if not open_positions:
-            logger.debug("[WEATHER] No open positions to manage.")
             return
-
-        logger.info(f"[WEATHER] Managing {len(open_positions)} open position(s).")
 
         for position in open_positions:
             market = self.client.get_market(position.condition_id)
             if market is None:
                 if isinstance(self.client, PaperClient):
                     logger.warning(
-                        f"Market {position.condition_id} not on Gamma API — "
+                        f"[WEATHER] Market {position.condition_id[:16]}… not on Gamma API — "
                         f"closing paper position at 50¢ (resolved/delisted)"
                     )
                     synthetic = _synthetic_market_for_orphan_position(position)
-                    self._close_position(position, synthetic, "market not found on Gamma API")
+                    self._close_position(position, synthetic, "market not found on Gamma API (closed at 50¢)")
                 else:
-                    logger.warning(f"Market {position.condition_id} not found – skipping")
+                    logger.warning(f"[WEATHER] Market {position.condition_id[:16]}… not found – skipping")
                 continue
 
-            # Market resolved → always close
+            # Market resolved → always close at final price
             if market.closed or market.days_to_resolution <= 0:
                 self._close_position(position, market, "market resolved")
                 continue
 
-            # Check early exit
+            # Check early exit (stop-loss / take-profit / thesis flip)
+            current_price = market.yes_price if position.side.value == "YES" else market.no_price
+            current_value = position.shares * current_price
+            pnl = current_value - position.entry_amount_usd
+            pnl_sign = "+" if pnl >= 0 else ""
+            logger.debug(
+                f"[WEATHER] CHECK {position.side.value} '{market.question[:50]}' | "
+                f"price={current_price:.3f} (entry={position.entry_price:.3f}) | "
+                f"P&L={pnl_sign}${pnl:.2f} ({pnl_sign}{pnl/position.entry_amount_usd*100:.1f}%)"
+            )
+
             should_exit, reason, _ = self._strategy.evaluate_exit(position, market)
             if should_exit:
                 self._close_position(position, market, reason)
@@ -234,6 +241,17 @@ class WeatherBot(BaseBot):
                 self._open_condition_ids.discard(market.condition_id)
                 self.tracker.record_close(closed.pnl_usd or 0.0)
 
+                pnl = closed.pnl_usd or 0.0
+                pnl_pct = closed.pnl_pct or 0.0
+                pnl_sign = "+" if pnl >= 0 else ""
+                pnl_color = "WIN" if pnl >= 0 else "LOSS"
+                logger.info(
+                    f"[PAPER] ═══ {pnl_color} ═══ CLOSED {position.side.value} | "
+                    f"'{market.question[:55]}' | "
+                    f"P&L={pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct*100:.1f}%) | "
+                    f"reason={reason}"
+                )
+
                 self.logger.log_trade(trade, notes=reason)
                 self.logger.log_position_close(
                     condition_id=market.condition_id,
@@ -245,7 +263,7 @@ class WeatherBot(BaseBot):
                     reason=reason,
                 )
             except Exception as exc:
-                logger.error(f"Error closing position {position.position_id}: {exc}")
+                logger.error(f"[PAPER] Error closing position {position.position_id}: {exc}")
         else:
             # Live: place SELL order
             trade = self.client.place_order(

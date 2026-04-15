@@ -108,7 +108,7 @@ class PaperClient:
                 break
             offset += batch
 
-        logger.info(f"[PAPER] Fetched {len(markets)} markets")
+        logger.debug(f"[PAPER] Fetched {len(markets)} markets")
         return markets
 
     def get_market(self, condition_id: str) -> Optional[Market]:
@@ -170,7 +170,7 @@ class PaperClient:
         self._state["trades"].append(trade.model_dump())
         _save_state(self._state)
 
-        logger.info(
+        logger.debug(
             f"[PAPER] {order_side.value} {side.value} | {market.question[:60]} | "
             f"${amount_usd:.2f} @ {price:.3f} | fee=${fee_usd:.2f} | shares={shares:.4f}"
         )
