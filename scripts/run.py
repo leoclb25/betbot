@@ -291,47 +291,54 @@ def status(mode: str) -> None:
 
         if open_pos:
             pos_table = Table(
-                title="Open Positions — P&L at entry price (last known)",
+                title=f"Open Positions ({len(open_pos)}) — precios al último ciclo del bot",
                 box=box.SIMPLE,
             )
-            pos_table.add_column("Side", width=5)
-            pos_table.add_column("Entry $", justify="right", width=9)
-            pos_table.add_column("Entry P", justify="right", width=8)
-            pos_table.add_column("Shares", justify="right", width=8)
-            pos_table.add_column("Cur Val*", justify="right", width=9)
-            pos_table.add_column("Unreal P&L*", justify="right", width=12)
-            pos_table.add_column("Edge", justify="right", width=7)
-            pos_table.add_column("Question", overflow="fold")
+            pos_table.add_column("#",         width=3)
+            pos_table.add_column("Side",      width=5)
+            pos_table.add_column("Abierta",   width=16)
+            pos_table.add_column("Cierra",    width=11)
+            pos_table.add_column("Entrada $", justify="right", width=10)
+            pos_table.add_column("P. entrada",justify="right", width=10)
+            pos_table.add_column("P&L est.*", justify="right", width=11)
+            pos_table.add_column("Edge",      justify="right", width=7)
+            pos_table.add_column("Pregunta", overflow="fold")
 
             FEE = 0.02
-            for p in open_pos:
-                entry_amt = p.get("entry_amount_usd", 0)
+            for i, p in enumerate(open_pos, 1):
+                entry_amt   = p.get("entry_amount_usd", 0)
                 entry_price = p.get("entry_price", 0)
-                shares = p.get("shares", 0)
-                side = p.get("side", "?")
-                # Current value using entry_price (last known price)
-                # Gross proceeds if we sell now at entry_price
-                gross = shares * entry_price
-                net = gross * (1 - FEE)
+                shares      = p.get("shares", 0)
+                side        = p.get("side", "?")
+                edge        = p.get("entry_edge", 0)
+
+                gross      = shares * entry_price
+                net        = gross * (1 - FEE)
                 unreal_pnl = net - entry_amt
-                unreal_color = "green" if unreal_pnl >= 0 else "red"
-                unreal_sign = "+" if unreal_pnl >= 0 else ""
-                edge = p.get("entry_edge", 0)
+                pnl_color  = "green" if unreal_pnl >= 0 else "red"
+                pnl_sign   = "+" if unreal_pnl >= 0 else ""
+
+                opened_raw = p.get("opened_at", "")
+                opened_str = opened_raw[:16].replace("T", " ") if opened_raw else "?"
+
+                end_raw = p.get("market_end_date", "")
+                end_str = end_raw[:10] if end_raw else "?"
 
                 pos_table.add_row(
+                    str(i),
                     side,
+                    opened_str,
+                    end_str,
                     f"${entry_amt:.2f}",
-                    f"{entry_price:.3f}",
-                    f"{shares:.3f}",
-                    f"${gross:.2f}",
-                    f"[{unreal_color}]{unreal_sign}${unreal_pnl:.2f}[/{unreal_color}]",
+                    f"{entry_price:.4f}",
+                    f"[{pnl_color}]{pnl_sign}${unreal_pnl:.2f}[/{pnl_color}]",
                     f"{edge*100:.1f}%",
-                    p.get("question", "")[:60],
+                    p.get("question", ""),
                 )
 
             console.print(pos_table)
             console.print(
-                "[dim]* Estimated using entry price — run bot cycle for live prices[/dim]"
+                "[dim]* P&L estimado con precio de entrada — corre un ciclo para actualizar precios[/dim]"
             )
 
 

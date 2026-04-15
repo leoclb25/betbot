@@ -155,6 +155,7 @@ class Position(BaseModel):
     entry_true_prob: float    # weather model probability at entry
     entry_edge: float
     opened_at: datetime
+    market_end_date: Optional[datetime] = None   # when the market resolves
     closed_at: Optional[datetime] = None
     exit_price: Optional[float] = None
     exit_fee_usd: float = 0.0

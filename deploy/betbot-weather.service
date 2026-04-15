@@ -23,8 +23,8 @@ WorkingDirectory=__INSTALL_DIR__
 # Lee el .env automáticamente
 EnvironmentFile=-__INSTALL_DIR__/.env
 
-# Comando principal
-ExecStart=__INSTALL_DIR__/.venv/bin/python -m scripts.run weather --mode paper
+# Comando principal — el modo lo controla BOT_MODE en el .env (paper o live)
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m scripts.run weather --mode ${BOT_MODE:-paper}
 
 # Reinicio automático si el proceso muere (ej. error de red)
 Restart=on-failure

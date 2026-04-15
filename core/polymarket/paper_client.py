@@ -200,6 +200,7 @@ class PaperClient:
             entry_true_prob=true_prob,
             entry_edge=edge,
             opened_at=trade.timestamp,
+            market_end_date=market.end_date,
             mode=BotMode.PAPER,
         )
         self._state["positions"][position_id] = position.model_dump()
