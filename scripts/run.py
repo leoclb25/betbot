@@ -290,39 +290,82 @@ def status(mode: str) -> None:
         ]
 
         if open_pos:
+            # Fetch live prices from Gamma API for each open position
+            import requests as _requests
+            _session = _requests.Session()
+            _session.headers.update({"Accept": "application/json"})
+
+            def _fetch_live_price(condition_id: str, side: str) -> float | None:
+                try:
+                    resp = _session.get(
+                        "https://gamma-api.polymarket.com/markets",
+                        params={"condition_ids": condition_id, "limit": "1"},
+                        timeout=8,
+                    )
+                    if resp.status_code != 200:
+                        return None
+                    data = resp.json()
+                    if not data:
+                        return None
+                    raw = data[0]
+                    prices = raw.get("outcomePrices", "[]")
+                    if isinstance(prices, str):
+                        prices = json.loads(prices)
+                    prices = [float(x) for x in prices]
+                    return prices[0] if side == "YES" else prices[1]
+                except Exception:
+                    return None
+
+            console.print("[dim]Obteniendo precios actuales del mercado...[/dim]")
+
             pos_table = Table(
-                title=f"Open Positions ({len(open_pos)}) — precios al último ciclo del bot",
+                title=f"Open Positions ({len(open_pos)}) — precios en tiempo real",
                 box=box.SIMPLE,
             )
-            pos_table.add_column("#",         width=3)
-            pos_table.add_column("Side",      width=5)
-            pos_table.add_column("Abierta",   width=16)
-            pos_table.add_column("Cierra",    width=11)
-            pos_table.add_column("Entrada $", justify="right", width=10)
-            pos_table.add_column("P. entrada",justify="right", width=10)
-            pos_table.add_column("P&L est.*", justify="right", width=11)
-            pos_table.add_column("Edge",      justify="right", width=7)
-            pos_table.add_column("Pregunta", overflow="fold")
+            pos_table.add_column("#",          width=3)
+            pos_table.add_column("Side",       width=5)
+            pos_table.add_column("Abierta",    width=16)
+            pos_table.add_column("Cierra",     width=11)
+            pos_table.add_column("Entrada $",  justify="right", width=10)
+            pos_table.add_column("P. entrada", justify="right", width=10)
+            pos_table.add_column("P. actual",  justify="right", width=10)
+            pos_table.add_column("P&L ahora",  justify="right", width=11)
+            pos_table.add_column("Edge",       justify="right", width=7)
+            pos_table.add_column("Pregunta",   overflow="fold")
 
             FEE = 0.02
+            total_live_pnl = 0.0
             for i, p in enumerate(open_pos, 1):
                 entry_amt   = p.get("entry_amount_usd", 0)
                 entry_price = p.get("entry_price", 0)
                 shares      = p.get("shares", 0)
                 side        = p.get("side", "?")
                 edge        = p.get("entry_edge", 0)
+                cid         = p.get("condition_id", "")
 
-                gross      = shares * entry_price
-                net        = gross * (1 - FEE)
-                unreal_pnl = net - entry_amt
-                pnl_color  = "green" if unreal_pnl >= 0 else "red"
-                pnl_sign   = "+" if unreal_pnl >= 0 else ""
+                live_price = _fetch_live_price(cid, side)
+                if live_price is not None:
+                    gross      = shares * live_price
+                    net        = gross * (1 - FEE)
+                    pnl        = net - entry_amt
+                    price_str  = f"{live_price:.4f}"
+                    live_label = ""
+                else:
+                    # fallback to entry price
+                    gross = shares * entry_price
+                    net   = gross * (1 - FEE)
+                    pnl   = net - entry_amt
+                    price_str  = f"{entry_price:.4f}"
+                    live_label = "[dim](entrada)[/dim]"
+
+                total_live_pnl += pnl
+                pnl_color = "green" if pnl >= 0 else "red"
+                pnl_sign  = "+" if pnl >= 0 else ""
 
                 opened_raw = p.get("opened_at", "")
                 opened_str = opened_raw[:16].replace("T", " ") if opened_raw else "?"
-
-                end_raw = p.get("market_end_date", "")
-                end_str = end_raw[:10] if end_raw else "?"
+                end_raw    = p.get("market_end_date", "")
+                end_str    = end_raw[:10] if end_raw else "?"
 
                 pos_table.add_row(
                     str(i),
@@ -331,14 +374,17 @@ def status(mode: str) -> None:
                     end_str,
                     f"${entry_amt:.2f}",
                     f"{entry_price:.4f}",
-                    f"[{pnl_color}]{pnl_sign}${unreal_pnl:.2f}[/{pnl_color}]",
+                    f"{price_str} {live_label}",
+                    f"[{pnl_color}]{pnl_sign}${pnl:.2f}[/{pnl_color}]",
                     f"{edge*100:.1f}%",
                     p.get("question", ""),
                 )
 
             console.print(pos_table)
+            sign = "+" if total_live_pnl >= 0 else ""
+            color = "green" if total_live_pnl >= 0 else "red"
             console.print(
-                "[dim]* P&L estimado con precio de entrada — corre un ciclo para actualizar precios[/dim]"
+                f"  P&L total si cierras todo ahora: [{color}]{sign}${total_live_pnl:.2f}[/{color}]"
             )
 
 
