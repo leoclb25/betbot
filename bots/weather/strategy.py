@@ -102,7 +102,7 @@ class WeatherStrategy:
 
         # Step 3: Calculate true probability
         weather_prob = self._weather.calculate_probability(
-            forecast, info.condition, info.threshold
+            forecast, info.condition, info.threshold, info.threshold_high
         )
         true_prob = weather_prob.true_probability
 
@@ -110,15 +110,17 @@ class WeatherStrategy:
         edge, side = self._risk.calculate_edge(
             true_prob=true_prob,
             market_price=market.yes_price,
-            is_hold_strategy=True,  # default: hold to resolution
+            is_hold_strategy=True,
         )
 
         market_price = market.yes_price if side == Side.YES else market.no_price
 
+        models_str = ",".join(weather_prob.models_used) if weather_prob.models_used else "?"
         logger.debug(
             f"[STRATEGY] {market.question[:70]} | "
-            f"true_prob={true_prob:.2%} market={market.yes_price:.2%} "
-            f"edge={edge:.2%} side={side.value} "
+            f"raw={weather_prob.raw_probability:.2%} → true={true_prob:.2%} | "
+            f"market={market.yes_price:.2%} edge={edge:.2%} side={side.value} | "
+            f"models={models_str} agreement={weather_prob.model_agreement:.2f} "
             f"confidence={weather_prob.confidence:.0%} members={forecast.member_count}"
         )
 
@@ -156,8 +158,10 @@ class WeatherStrategy:
             kelly_fraction=kelly_pct,
             position_size_usd=position_usd,
             reason=(
-                f"edge={edge:.1%} true_prob={true_prob:.1%} "
+                f"edge={edge:.1%} true_prob={true_prob:.1%} raw={weather_prob.raw_probability:.1%} "
                 f"market={market.yes_price:.1%} kelly={kelly_pct:.1%} "
+                f"models={','.join(weather_prob.models_used)} "
+                f"agreement={weather_prob.model_agreement:.2f} "
                 f"confidence={weather_prob.confidence:.0%} members={forecast.member_count}"
             ),
         )
@@ -192,7 +196,7 @@ class WeatherStrategy:
             )
             if forecast and forecast.member_count > 0:
                 weather_prob = self._weather.calculate_probability(
-                    forecast, info.condition, info.threshold
+                    forecast, info.condition, info.threshold, info.threshold_high
                 )
                 new_true_prob = weather_prob.true_probability
 

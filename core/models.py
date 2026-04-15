@@ -87,12 +87,14 @@ class WeatherMarketInfo(BaseModel):
     condition_id: str
     question: str
     location: str
+
     latitude: float
     longitude: float
     target_date: date
     condition: WeatherCondition
-    threshold: Optional[float] = None   # e.g., 90 for "> 90°F"
-    threshold_unit: Optional[str] = None  # "F", "C", "mm", "mph"
+    threshold: Optional[float] = None      # lower bound (or exact value) in °C
+    threshold_high: Optional[float] = None # upper bound for range markets (°C)
+    threshold_unit: Optional[str] = None   # always "C" after normalization
 
 
 # ─── Weather forecast ────────────────────────────────────────────────────────
@@ -117,9 +119,11 @@ class WeatherProbability(BaseModel):
     condition: WeatherCondition
     true_probability: float = Field(ge=0.0, le=1.0)
     raw_probability: float = Field(ge=0.0, le=1.0)  # before confidence decay
-    confidence: float = Field(ge=0.0, le=1.0)        # based on days out
+    confidence: float = Field(ge=0.0, le=1.0)        # composite: days_out + model agreement
     days_out: float
     member_count: int
+    model_agreement: float = Field(ge=0.0, le=1.0, default=1.0)  # 1=full agreement, 0=max disagreement
+    models_used: list[str] = Field(default_factory=list)
     fetched_at: datetime
 
 

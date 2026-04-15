@@ -1,20 +1,21 @@
 """
-Open-Meteo weather client.
+Open-Meteo weather client — multi-model.
 
-Uses:
-  - Geocoding API  – city name → (lat, lon)          [free, no key]
-  - Ensemble API   – 50-member hourly ensemble        [free, no key]
-  - Forecast API   – deterministic forecast (fallback)[free, no key]
+Sources (all free, no API key):
+  - Open-Meteo Ensemble API  – ICON (40 members) + ECMWF IFS (51 members)
+  - Open-Meteo Forecast API  – GFS deterministic (US model, fallback + 3rd opinion)
+  - NWS (api.weather.gov)    – US cities only, official NOAA hourly forecast
+  - Geocoding API            – city name → (lat, lon)
 
-The Ensemble API returns HOURLY data per member. We aggregate to daily:
-  - precipitation: sum of all hours in the target day
-  - temperature_max: max of all hours
-  - wind_speed_max: max of all hours
+Probability calculation:
+  1. Each model produces a raw probability from its ensemble members.
+  2. Model agreement = 1 - normalized_std(model_probs). Low agreement → shrink harder.
+  3. Days-out decay multiplier applied on top.
+  4. For range markets (threshold_low to threshold_high), fraction of members
+     within the exact band is used instead of above/below.
 
-Ensemble members give us empirical probability distributions:
-  P(rain) = fraction of members with total_precip > threshold
-  P(temp > X) = fraction of members with daily_max_temp > X
-  etc.
+Final confidence = days_decay * agreement_factor
+true_probability  = 0.5 + (raw - 0.5) * confidence
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import os
 import random
 import time
 from datetime import date, datetime, timezone
+from statistics import mean, stdev
 from typing import Optional
 
 import requests
@@ -30,7 +32,8 @@ from loguru import logger
 
 from core.models import EnsembleForecast, WeatherCondition, WeatherProbability
 
-# Open-Meteo free tier: space requests and retry on 429 (burst limits are strict).
+# ── Rate-limiting config ──────────────────────────────────────────────────────
+
 def _env_float(key: str, default: str) -> float:
     try:
         return float(os.getenv(key, default))
@@ -45,14 +48,13 @@ def _env_int(key: str, default: str) -> int:
         return int(default)
 
 
-ENSEMBLE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_ENSEMBLE_MIN_INTERVAL", "2.25")
-ENSEMBLE_MAX_RETRIES = max(1, _env_int("OPEN_METEO_ENSEMBLE_MAX_RETRIES", "6"))
-GEOCODE_MIN_INTERVAL_SEC = _env_float("OPEN_METEO_GEOCODE_MIN_INTERVAL", "0.4")
-POST_429_COOLDOWN_SEC = _env_float("OPEN_METEO_POST_429_COOLDOWN_SEC", "22")
+ENSEMBLE_MIN_INTERVAL_SEC  = _env_float("OPEN_METEO_ENSEMBLE_MIN_INTERVAL", "2.25")
+ENSEMBLE_MAX_RETRIES       = max(1, _env_int("OPEN_METEO_ENSEMBLE_MAX_RETRIES", "6"))
+GEOCODE_MIN_INTERVAL_SEC   = _env_float("OPEN_METEO_GEOCODE_MIN_INTERVAL", "0.4")
+POST_429_COOLDOWN_SEC      = _env_float("OPEN_METEO_POST_429_COOLDOWN_SEC", "22")
 
 
 def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
-    """Seconds to wait after HTTP 429 (header Retry-After or exponential backoff + jitter)."""
     ra = response.headers.get("Retry-After")
     if ra:
         try:
@@ -63,36 +65,36 @@ def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
     return base * (1.0 + random.uniform(0.0, 0.2))
 
 
+# ── API endpoints ─────────────────────────────────────────────────────────────
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+ENSEMBLE_URL  = "https://ensemble-api.open-meteo.com/v1/ensemble"
+FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
+NWS_POINTS    = "https://api.weather.gov/points/{lat},{lon}"
 
-# Confidence multiplier per day out (shrinks probability toward 0.5)
-# adjusted = 0.5 + (raw - 0.5) * confidence
-CONFIDENCE_DECAY = {
-    0: 1.00,
-    1: 0.92,
-    2: 0.82,
-    3: 0.70,
-    4: 0.60,
-    5: 0.52,
-    6: 0.46,
-    7: 0.40,
-}
+# Open-Meteo ensemble models to query (in priority order).
+# icon_seamless  = ICON global, ~40 members, German weather service, strong in Europe
+# ecmwf_ifs04    = ECMWF IFS,  51 members, European Centre, best global model
+ENSEMBLE_MODELS = ["icon_seamless", "ecmwf_ifs04"]
 
-# Default rain threshold (mm/day to count as a rain day)
+# Days-out base confidence (shrinks raw probability toward 0.5).
+# This is the *base* — model disagreement reduces it further.
+CONFIDENCE_DECAY = {0: 1.00, 1: 0.92, 2: 0.82, 3: 0.70, 4: 0.60, 5: 0.52, 6: 0.46, 7: 0.40}
+
 RAIN_THRESHOLD_MM = 0.5
+
+# Rough bounding box for NWS coverage (continental US + AK + HI approximation)
+def _is_us_location(lat: float, lon: float) -> bool:
+    return (24.0 <= lat <= 72.0) and (-180.0 <= lon <= -60.0)
 
 
 class WeatherClient:
-    """Fetches weather ensemble forecasts and converts them to probabilities."""
+    """Fetches multi-model weather forecasts and converts them to calibrated probabilities."""
 
     def __init__(self) -> None:
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
         self._geo_cache: dict[str, tuple[float, float]] = {}
-        # Cache ensemble forecasts keyed by (lat_rounded, lon_rounded, date_iso)
-        # to avoid redundant API calls within the same scan cycle
+        # Cache keyed by (lat_r, lon_r, date_iso, model)
         self._forecast_cache: dict[tuple, EnsembleForecast] = {}
         self._last_ensemble_request: float = 0.0
         self._last_geocode_request: float = 0.0
@@ -101,10 +103,6 @@ class WeatherClient:
     # ── Geocoding ────────────────────────────────────────────────────────────
 
     def geocode(self, location: str) -> Optional[tuple[float, float]]:
-        """
-        Convert a location name to (latitude, longitude).
-        Returns None if location not found.
-        """
         if location in self._geo_cache:
             return self._geo_cache[location]
 
@@ -119,9 +117,7 @@ class WeatherClient:
         )
         self._last_geocode_request = time.monotonic()
         resp.raise_for_status()
-        data = resp.json()
-
-        results = data.get("results", [])
+        results = resp.json().get("results", [])
         if not results:
             logger.warning(f"Could not geocode location: '{location}'")
             return None
@@ -129,10 +125,10 @@ class WeatherClient:
         lat = float(results[0]["latitude"])
         lon = float(results[0]["longitude"])
         self._geo_cache[location] = (lat, lon)
-        logger.debug(f"Geocoded '{location}' → ({lat}, {lon})")
+        logger.debug(f"Geocoded '{location}' → ({lat:.3f}, {lon:.3f})")
         return lat, lon
 
-    # ── Ensemble forecast ────────────────────────────────────────────────────
+    # ── Main public method ────────────────────────────────────────────────────
 
     def get_ensemble_forecast(
         self,
@@ -142,40 +138,78 @@ class WeatherClient:
         location_name: str = "",
     ) -> Optional[EnsembleForecast]:
         """
-        Fetch hourly ensemble forecast for a specific date and aggregate to daily.
-
-        Open-Meteo ensemble provides ~50 members from the ICON ensemble model.
-        The API only supports hourly variables; we aggregate to daily values:
-          - precipitation: sum over 24h
-          - temperature: max over 24h
-          - wind: max over 24h
+        Fetch and combine forecasts from all available models.
+        Returns a single EnsembleForecast whose member lists contain all
+        models' members concatenated (ICON + ECMWF ≈ 91 members).
         """
         days_out = (target_date - date.today()).days
-        # days_out=-1 puede pasar cuando el end_date del mercado es medianoche UTC
-        # y el target_date se parsea como "ayer". Tratamos -1 como día 0 (hoy).
         if days_out == -1:
             days_out = 0
         if days_out < 0 or days_out > 7:
-            logger.debug(
-                f"Target date {target_date} is {days_out} days out – outside ensemble window (0–7)"
-            )
+            logger.debug(f"Target date {target_date} is {days_out} days out — outside window (0–7)")
             return None
 
-        # Check cache (round to 2 decimal places ≈ ~1km resolution)
-        cache_key = (round(latitude, 2), round(longitude, 2), target_date.isoformat())
+        forecasts: list[EnsembleForecast] = []
+        models_fetched: list[str] = []
+
+        # 1. Fetch each ensemble model
+        for model in ENSEMBLE_MODELS:
+            fc = self._fetch_ensemble_model(latitude, longitude, target_date, location_name, model)
+            if fc and fc.member_count > 0:
+                forecasts.append(fc)
+                models_fetched.append(model)
+
+        # 2. NWS for US locations (authoritative, single deterministic value but independent)
+        if _is_us_location(latitude, longitude):
+            nws_fc = self._fetch_nws(latitude, longitude, target_date, location_name)
+            if nws_fc and nws_fc.member_count > 0:
+                forecasts.append(nws_fc)
+                models_fetched.append("nws")
+
+        # 3. GFS deterministic as extra member for Americas
+        if not forecasts or (_is_us_location(latitude, longitude) and len(forecasts) < 2):
+            gfs_fc = self._fetch_gfs(latitude, longitude, target_date, location_name)
+            if gfs_fc and gfs_fc.member_count > 0:
+                forecasts.append(gfs_fc)
+                models_fetched.append("gfs")
+
+        if not forecasts:
+            logger.warning(f"All weather models failed for {location_name} {target_date}")
+            return None
+
+        # 4. Combine all members into one EnsembleForecast
+        combined = self._combine_forecasts(forecasts, location_name, latitude, longitude, target_date)
+        combined_models = ", ".join(models_fetched)
+        logger.debug(
+            f"[MULTI-MODEL] {location_name} {target_date} | models={combined_models} | "
+            f"total_members={combined.member_count} | "
+            f"temp_avg={mean(combined.temperature_max_c):.1f}°C" if combined.temperature_max_c else ""
+        )
+        # Attach model names so calculate_probability can use them
+        self._last_models: list[str] = models_fetched
+        self._last_per_model_forecasts: list[EnsembleForecast] = forecasts
+
+        return combined
+
+    # ── Per-model fetchers ────────────────────────────────────────────────────
+
+    def _fetch_ensemble_model(
+        self,
+        latitude: float,
+        longitude: float,
+        target_date: date,
+        location_name: str,
+        model: str,
+    ) -> Optional[EnsembleForecast]:
+        cache_key = (round(latitude, 2), round(longitude, 2), target_date.isoformat(), model)
         if cache_key in self._forecast_cache:
-            logger.debug(f"Forecast cache hit for {cache_key}")
             return self._forecast_cache[cache_key]
 
         params = {
             "latitude": latitude,
             "longitude": longitude,
-            "hourly": [
-                "precipitation",
-                "temperature_2m",
-                "wind_speed_10m",
-            ],
-            "models": "icon_seamless",
+            "hourly": ["precipitation", "temperature_2m", "wind_speed_10m"],
+            "models": model,
             "start_date": target_date.isoformat(),
             "end_date": target_date.isoformat(),
             "timezone": "UTC",
@@ -201,7 +235,7 @@ class WeatherClient:
                     )
                     wait = _retry_after_seconds(resp, attempt)
                     logger.warning(
-                        f"Open-Meteo ensemble 429 — esperando {wait:.1f}s "
+                        f"Open-Meteo 429 ({model}) — esperando {wait:.1f}s "
                         f"(intento {attempt + 1}/{ENSEMBLE_MAX_RETRIES})"
                     )
                     time.sleep(wait)
@@ -212,100 +246,53 @@ class WeatherClient:
                 break
 
             except requests.RequestException as exc:
-                logger.error(f"Ensemble API error: {exc}")
-                return self._fallback_forecast(latitude, longitude, target_date, location_name)
+                logger.warning(f"Ensemble API error ({model}): {exc}")
+                return None
 
         if data is None:
-            logger.warning(
-                "Open-Meteo ensemble: agotados reintentos por 429; usando forecast determinístico"
-            )
-            return self._fallback_forecast(latitude, longitude, target_date, location_name)
+            return None
 
         hourly = data.get("hourly", {})
         if not hourly:
-            return self._fallback_forecast(latitude, longitude, target_date, location_name)
+            return None
 
-        # Aggregate per-member hourly → daily
-        precip_members = self._aggregate_members(hourly, "precipitation", agg="sum")
-        temp_max_members = self._aggregate_members(hourly, "temperature_2m", agg="max")
-        wind_max_members = self._aggregate_members(hourly, "wind_speed_10m", agg="max")
+        precip   = self._aggregate_members(hourly, "precipitation", "sum")
+        temp_max = self._aggregate_members(hourly, "temperature_2m", "max")
+        wind_max = self._aggregate_members(hourly, "wind_speed_10m", "max")
 
-        if not precip_members:
-            logger.debug("No ensemble members found, using deterministic fallback")
-            return self._fallback_forecast(latitude, longitude, target_date, location_name)
+        if not precip:
+            return None
 
-        forecast = EnsembleForecast(
+        fc = EnsembleForecast(
             location=location_name or f"{latitude},{longitude}",
             latitude=latitude,
             longitude=longitude,
             target_date=target_date,
             fetched_at=datetime.now(timezone.utc),
-            precipitation_mm=precip_members,
-            temperature_max_c=temp_max_members,
-            temperature_min_c=temp_max_members,  # use same series; min would need separate var
-            wind_speed_max_kmh=wind_max_members,
-            member_count=len(precip_members),
+            precipitation_mm=precip,
+            temperature_max_c=temp_max,
+            temperature_min_c=temp_max,
+            wind_speed_max_kmh=wind_max,
+            member_count=len(precip),
         )
-        logger.debug(
-            f"Ensemble forecast for {location_name or f'({latitude},{longitude})'} "
-            f"on {target_date} | {forecast.member_count} members | "
-            f"precip avg={sum(precip_members)/len(precip_members):.1f}mm "
-            f"temp avg={sum(temp_max_members)/len(temp_max_members):.1f}°C"
-        )
-        self._forecast_cache[cache_key] = forecast
-        return forecast
+        self._forecast_cache[cache_key] = fc
+        logger.debug(f"  [{model}] {len(precip)} members | temp_avg={mean(temp_max):.1f}°C")
+        return fc
 
-    def _aggregate_members(
-        self, hourly: dict, variable: str, agg: str
-    ) -> list[float]:
-        """
-        Aggregate 24 hourly values per ensemble member into a single daily value.
-
-        agg='sum'  → total (precipitation)
-        agg='max'  → maximum (temperature, wind)
-        """
-        members = []
-        for i in range(1, 60):  # up to 59 members
-            key = f"{variable}_member{i:02d}"
-            if key not in hourly:
-                break
-            values = [v for v in hourly[key] if v is not None]
-            if not values:
-                continue
-            if agg == "sum":
-                members.append(sum(values))
-            else:  # max
-                members.append(max(values))
-
-        # Fallback to plain (non-member) variable if no member keys found
-        if not members and variable in hourly:
-            values = [v for v in hourly[variable] if v is not None]
-            if values:
-                val = sum(values) if agg == "sum" else max(values)
-                members = [val]
-
-        return members
-
-    def _fallback_forecast(
+    def _fetch_gfs(
         self,
         latitude: float,
         longitude: float,
         target_date: date,
         location_name: str,
     ) -> Optional[EnsembleForecast]:
-        """Use deterministic forecast API as fallback (single member)."""
-        days_out = (target_date - date.today()).days
-        if days_out == -1:
-            days_out = 0
+        """GFS deterministic forecast via Open-Meteo forecast API."""
+        days_out = max(0, (target_date - date.today()).days)
         params = {
             "latitude": latitude,
             "longitude": longitude,
-            "daily": [
-                "precipitation_sum",
-                "temperature_2m_max",
-                "temperature_2m_min",
-                "wind_speed_10m_max",
-            ],
+            "daily": ["precipitation_sum", "temperature_2m_max", "wind_speed_10m_max"],
+            "models": "gfs_seamless",
             "timezone": "UTC",
             "forecast_days": max(days_out + 1, 1),
         }
@@ -318,7 +305,7 @@ class WeatherClient:
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.error(f"Fallback forecast API error: {exc}")
+            logger.debug(f"GFS forecast error: {exc}")
             return None
 
         daily = data.get("daily", {})
@@ -329,9 +316,13 @@ class WeatherClient:
 
         def _get(key: str) -> list[float]:
             v = daily.get(key, [])
-            return [float(v[idx])] if idx < len(v) and v[idx] is not None else [0.0]
+            return [float(v[idx])] if idx < len(v) and v[idx] is not None else []
 
-        logger.debug(f"Using deterministic fallback for {location_name or f'({latitude},{longitude})'}")
+        temp = _get("temperature_2m_max")
+        if not temp:
+            return None
+
+        logger.debug(f"  [gfs] 1 member | temp={temp[0]:.1f}°C")
         return EnsembleForecast(
             location=location_name or f"{latitude},{longitude}",
             latitude=latitude,
@@ -339,35 +330,181 @@ class WeatherClient:
             target_date=target_date,
             fetched_at=datetime.now(timezone.utc),
             precipitation_mm=_get("precipitation_sum"),
-            temperature_max_c=_get("temperature_2m_max"),
-            temperature_min_c=_get("temperature_2m_min"),
+            temperature_max_c=temp,
+            temperature_min_c=temp,
             wind_speed_max_kmh=_get("wind_speed_10m_max"),
             member_count=1,
         )
 
-    # ── Probability calculation ──────────────────────────────────────────────
+    def _fetch_nws(
+        self,
+        latitude: float,
+        longitude: float,
+        target_date: date,
+        location_name: str,
+    ) -> Optional[EnsembleForecast]:
+        """
+        NWS (NOAA) hourly forecast for US locations.
+        Returns a single-member EnsembleForecast representing the official NWS forecast.
+        """
+        try:
+            # Step 1: get gridpoint URL
+            url = NWS_POINTS.format(lat=round(latitude, 4), lon=round(longitude, 4))
+            resp = self._session.get(url, timeout=10, headers={"User-Agent": "betbot/1.0"})
+            if resp.status_code != 200:
+                return None
+            grid_url = resp.json().get("properties", {}).get("forecastHourly")
+            if not grid_url:
+                return None
+
+            # Step 2: get hourly forecast
+            resp2 = self._session.get(grid_url, timeout=15, headers={"User-Agent": "betbot/1.0"})
+            if resp2.status_code != 200:
+                return None
+            periods = resp2.json().get("properties", {}).get("periods", [])
+
+        except Exception as exc:
+            logger.debug(f"NWS fetch error: {exc}")
+            return None
+
+        # Filter periods that fall on target_date (UTC)
+        target_str = target_date.isoformat()
+        temps_f: list[float] = []
+        precip_vals: list[float] = []
+
+        for p in periods:
+            start = p.get("startTime", "")
+            if target_str not in start:
+                continue
+            t = p.get("temperature")
+            unit = p.get("temperatureUnit", "F")
+            if t is not None:
+                t_c = (float(t) - 32) * 5 / 9 if unit == "F" else float(t)
+                temps_f.append(t_c)
+            prob_precip = p.get("probabilityOfPrecipitation", {})
+            if prob_precip and prob_precip.get("value") is not None:
+                precip_vals.append(float(prob_precip["value"]) / 100.0)
+
+        if not temps_f:
+            return None
+
+        temp_max = max(temps_f)
+        # Convert PoP (probability of precipitation) to mm equivalent (rough)
+        avg_pop = mean(precip_vals) if precip_vals else 0.0
+        # Rough: 50% PoP ≈ 3mm expected precip
+        precip_mm = avg_pop * 6.0
+
+        logger.debug(f"  [nws] 1 member | temp_max={temp_max:.1f}°C | precip_est={precip_mm:.1f}mm")
+        return EnsembleForecast(
+            location=location_name or f"{latitude},{longitude}",
+            latitude=latitude,
+            longitude=longitude,
+            target_date=target_date,
+            fetched_at=datetime.now(timezone.utc),
+            precipitation_mm=[precip_mm],
+            temperature_max_c=[temp_max],
+            temperature_min_c=[min(temps_f)],
+            wind_speed_max_kmh=[0.0],
+            member_count=1,
+        )
+
+    # ── Combine forecasts ─────────────────────────────────────────────────────
+
+    def _combine_forecasts(
+        self,
+        forecasts: list[EnsembleForecast],
+        location: str,
+        lat: float,
+        lon: float,
+        target_date: date,
+    ) -> EnsembleForecast:
+        """Concatenate all members from all models into one EnsembleForecast."""
+        all_precip:   list[float] = []
+        all_temp_max: list[float] = []
+        all_temp_min: list[float] = []
+        all_wind:     list[float] = []
+
+        for fc in forecasts:
+            all_precip.extend(fc.precipitation_mm)
+            all_temp_max.extend(fc.temperature_max_c)
+            all_temp_min.extend(fc.temperature_min_c)
+            all_wind.extend(fc.wind_speed_max_kmh)
+
+        return EnsembleForecast(
+            location=location,
+            latitude=lat,
+            longitude=lon,
+            target_date=target_date,
+            fetched_at=datetime.now(timezone.utc),
+            precipitation_mm=all_precip,
+            temperature_max_c=all_temp_max,
+            temperature_min_c=all_temp_min,
+            wind_speed_max_kmh=all_wind,
+            member_count=len(all_temp_max),
+        )
+
+    # ── Probability calculation ───────────────────────────────────────────────
 
     def calculate_probability(
         self,
         forecast: EnsembleForecast,
         condition: WeatherCondition,
         threshold: Optional[float] = None,
+        threshold_high: Optional[float] = None,
     ) -> WeatherProbability:
         """
-        Convert ensemble forecast to a probability for a given condition.
+        Convert multi-model ensemble forecast to a calibrated probability.
 
-        The raw probability is the empirical fraction of ensemble members
-        that satisfy the condition. It is then shrunk toward 0.5 based on
-        how many days out the forecast is (epistemic uncertainty).
+        Steps:
+          1. Compute raw probability per model (using stored per-model forecasts).
+          2. Model agreement = 1 - spread_of_model_probs (normalized).
+          3. Composite confidence = days_decay * (0.6 + 0.4 * agreement).
+          4. true_prob = 0.5 + (raw - 0.5) * confidence.
         """
         days_out = (forecast.target_date - date.today()).days
         days_out = max(0, min(days_out, 7))
-        confidence = CONFIDENCE_DECAY.get(days_out, 0.40)
+        base_decay = CONFIDENCE_DECAY.get(days_out, 0.40)
 
-        raw_prob = self._raw_probability(forecast, condition, threshold)
+        # Per-model raw probabilities (for agreement calculation)
+        per_model_forecasts = getattr(self, "_last_per_model_forecasts", [forecast])
+        models_used = getattr(self, "_last_models", ["icon_seamless"])
 
-        # Shrink toward 0.5 by confidence factor
+        model_probs: list[float] = []
+        for fc in per_model_forecasts:
+            p = self._raw_probability(fc, condition, threshold, threshold_high)
+            model_probs.append(p)
+
+        raw_prob = self._raw_probability(forecast, condition, threshold, threshold_high)
+
+        # Model agreement: 1.0 = all models agree, 0.0 = max spread (0.5)
+        if len(model_probs) >= 2:
+            spread = stdev(model_probs)  # std dev of probabilities
+            # Normalize: spread of 0.5 (max possible) → agreement=0, spread=0 → agreement=1
+            agreement = max(0.0, 1.0 - (spread / 0.25))
+        else:
+            agreement = 0.85  # single model: moderate agreement assumed
+
+        # Composite confidence: decay * blend(agreement)
+        # Even with full disagreement, keep at least 60% of base decay
+        agreement_factor = 0.60 + 0.40 * agreement
+        confidence = base_decay * agreement_factor
+
+        # Extra penalty for narrow range markets (threshold to threshold_high)
+        if threshold_high is not None and threshold is not None:
+            range_c = abs(threshold_high - threshold)
+            # A 1°F = 0.56°C range gets ~15% extra shrinkage; wider ranges less
+            range_penalty = max(0.70, 1.0 - (0.56 / max(range_c, 0.1)) * 0.15)
+            confidence = confidence * range_penalty
+
+        confidence = max(0.10, min(1.0, confidence))
         adjusted = 0.5 + (raw_prob - 0.5) * confidence
+
+        logger.debug(
+            f"  prob: raw={raw_prob:.2%} | models={models_used} | "
+            f"probs={[f'{p:.2%}' for p in model_probs]} | "
+            f"agreement={agreement:.2f} | decay={base_decay:.2f} | "
+            f"confidence={confidence:.2f} | adjusted={adjusted:.2%}"
+        )
 
         return WeatherProbability(
             condition=condition,
@@ -376,6 +513,8 @@ class WeatherClient:
             confidence=confidence,
             days_out=float(days_out),
             member_count=forecast.member_count,
+            model_agreement=agreement,
+            models_used=models_used,
             fetched_at=forecast.fetched_at,
         )
 
@@ -384,8 +523,9 @@ class WeatherClient:
         forecast: EnsembleForecast,
         condition: WeatherCondition,
         threshold: Optional[float],
+        threshold_high: Optional[float] = None,
     ) -> float:
-        """Calculate raw (unadjusted) ensemble probability."""
+        """Raw probability from ensemble members (no confidence adjustment)."""
         if condition == WeatherCondition.RAIN:
             return self._fraction_above(
                 forecast.precipitation_mm,
@@ -414,7 +554,12 @@ class WeatherClient:
             members = forecast.temperature_max_c
             if not members:
                 return 0.5
-            return sum(1 for v in members if abs(v - threshold) < 0.5) / len(members)
+            if threshold_high is not None:
+                # Range market: fraction of members within [threshold, threshold_high]
+                return sum(1 for v in members if threshold <= v <= threshold_high) / len(members)
+            else:
+                # Exact value: ±0.5°C window
+                return sum(1 for v in members if abs(v - threshold) <= 0.5) / len(members)
 
         elif condition == WeatherCondition.WIND_ABOVE:
             if threshold is None:
@@ -435,6 +580,24 @@ class WeatherClient:
 
         logger.warning(f"Unknown condition {condition}, defaulting to 0.5")
         return 0.5
+
+    def _aggregate_members(self, hourly: dict, variable: str, agg: str) -> list[float]:
+        members = []
+        for i in range(1, 60):
+            key = f"{variable}_member{i:02d}"
+            if key not in hourly:
+                break
+            values = [v for v in hourly[key] if v is not None]
+            if not values:
+                continue
+            members.append(sum(values) if agg == "sum" else max(values))
+
+        if not members and variable in hourly:
+            values = [v for v in hourly[variable] if v is not None]
+            if values:
+                members = [sum(values) if agg == "sum" else max(values)]
+
+        return members
 
     @staticmethod
     def _fraction_above(values: list[float], threshold: float) -> float:

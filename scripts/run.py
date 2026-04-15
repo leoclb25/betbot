@@ -327,6 +327,7 @@ def status(mode: str) -> None:
             pos_table.add_column("Abierta",    width=16)
             pos_table.add_column("Cierra",     width=11)
             pos_table.add_column("Entrada $",  justify="right", width=10)
+            pos_table.add_column("Shares",     justify="right", width=10)
             pos_table.add_column("P. entrada", justify="right", width=10)
             pos_table.add_column("P. actual",  justify="right", width=10)
             pos_table.add_column("P&L ahora",  justify="right", width=11)
@@ -373,6 +374,7 @@ def status(mode: str) -> None:
                     opened_str,
                     end_str,
                     f"${entry_amt:.2f}",
+                    f"{shares:.2f}",
                     f"{entry_price:.4f}",
                     f"{price_str} {live_label}",
                     f"[{pnl_color}]{pnl_sign}${pnl:.2f}[/{pnl_color}]",

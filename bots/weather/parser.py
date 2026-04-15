@@ -130,7 +130,7 @@ class WeatherMarketParser:
             logger.debug(f"Could not extract date from: '{q[:80]}'")
             return None
 
-        condition, threshold, unit = self._extract_condition(q)
+        condition, threshold, threshold_high, unit = self._extract_condition(q)
 
         lat, lon = coords
         return WeatherMarketInfo(
@@ -142,6 +142,7 @@ class WeatherMarketParser:
             target_date=target_date,
             condition=condition,
             threshold=threshold,
+            threshold_high=threshold_high,
             threshold_unit=unit,
         )
 
@@ -274,25 +275,20 @@ class WeatherMarketParser:
 
     def _extract_condition(
         self, question: str
-    ) -> tuple[WeatherCondition, Optional[float], Optional[str]]:
+    ) -> tuple[WeatherCondition, Optional[float], Optional[float], Optional[str]]:
         """
-        Extract condition type, threshold value, and unit.
-
-        Handles Polymarket-specific formats:
-          "be {X}°C or higher"      → TEMPERATURE_ABOVE
-          "be {X}°C or below"       → TEMPERATURE_BELOW
-          "be {X}°C"                → TEMPERATURE_EXACT (exact temperature match)
-          "be between {X}-{Y}°F"    → TEMPERATURE_EXACT (midpoint of range)
-          "be {X}°F or higher"      → TEMPERATURE_ABOVE (converted to °C)
-          plain rain/snow/wind      → respective conditions
+        Extract condition type, threshold_low, threshold_high, and unit.
+        Returns (condition, threshold_low_c, threshold_high_c, unit).
+        threshold_high is only set for range markets ("between X-Y°F").
+        All temperatures are converted to °C.
         """
         q_lower = question.lower()
 
         # ── Hurricane / tropical storm ────────────────────────────────────────
         if "hurricane" in q_lower:
-            return WeatherCondition.HURRICANE, None, None
+            return WeatherCondition.HURRICANE, None, None, None
         if any(w in q_lower for w in ["tornado", "cyclone", "typhoon"]):
-            return WeatherCondition.STORM, None, None
+            return WeatherCondition.STORM, None, None, None
 
         # ── Temperature: "between X-Y°F/°C" range ────────────────────────────
         m = re.search(
@@ -300,16 +296,12 @@ class WeatherMarketParser:
             q_lower,
         )
         if m:
-            low = float(m.group(1))
+            low  = float(m.group(1))
             high = float(m.group(2))
             unit = "F" if m.group(3).startswith("f") else "C"
-            mid = (low + high) / 2.0
-            mid_c = (mid - 32) * 5 / 9 if unit == "F" else mid
-            half_range = (high - low) / 2.0
-            half_range_c = half_range * (5 / 9) if unit == "F" else half_range
-            # Store midpoint and half-range encoded as negative threshold (sentinel)
-            # Strategy: use TEMPERATURE_EXACT with threshold = midpoint in °C
-            return WeatherCondition.TEMPERATURE_EXACT, round(mid_c, 2), "C"
+            low_c  = (low  - 32) * 5 / 9 if unit == "F" else low
+            high_c = (high - 32) * 5 / 9 if unit == "F" else high
+            return WeatherCondition.TEMPERATURE_EXACT, round(low_c, 3), round(high_c, 3), "C"
 
         # ── Temperature: "be X°C/°F [or higher/or below/or above/or lower]" ──
         m = re.search(
@@ -324,12 +316,11 @@ class WeatherMarketParser:
             val_c = (val - 32) * 5 / 9 if unit == "F" else val
 
             if modifier in ("higher", "above"):
-                return WeatherCondition.TEMPERATURE_ABOVE, round(val_c, 2), "C"
+                return WeatherCondition.TEMPERATURE_ABOVE, round(val_c, 2), None, "C"
             elif modifier in ("lower", "below"):
-                return WeatherCondition.TEMPERATURE_BELOW, round(val_c, 2), "C"
+                return WeatherCondition.TEMPERATURE_BELOW, round(val_c, 2), None, "C"
             else:
-                # Exact match (no modifier) – e.g. "be 29°C"
-                return WeatherCondition.TEMPERATURE_EXACT, round(val_c, 2), "C"
+                return WeatherCondition.TEMPERATURE_EXACT, round(val_c, 2), None, "C"
 
         # ── Temperature: "exceed / above / over X°C" ─────────────────────────
         m = re.search(
@@ -340,7 +331,7 @@ class WeatherMarketParser:
             val = float(m.group(1))
             unit = "F" if m.group(2).startswith("f") else "C"
             val_c = (val - 32) * 5 / 9 if unit == "F" else val
-            return WeatherCondition.TEMPERATURE_ABOVE, round(val_c, 2), "C"
+            return WeatherCondition.TEMPERATURE_ABOVE, round(val_c, 2), None, "C"
 
         # ── Temperature: "below / under / drop below X°C" ────────────────────
         m = re.search(
@@ -351,28 +342,28 @@ class WeatherMarketParser:
             val = float(m.group(1))
             unit = "F" if m.group(2).startswith("f") else "C"
             val_c = (val - 32) * 5 / 9 if unit == "F" else val
-            return WeatherCondition.TEMPERATURE_BELOW, round(val_c, 2), "C"
+            return WeatherCondition.TEMPERATURE_BELOW, round(val_c, 2), None, "C"
 
         # ── Generic temperature mention (last resort) ─────────────────────────
         if any(w in q_lower for w in ["temperature", "degrees", "°f", "°c", "fahrenheit", "celsius"]):
             threshold, unit = self._extract_numeric_threshold(question)
             if any(w in q_lower for w in ["exceed", "above", "over", "high", "hot", "warm", "higher"]):
-                return WeatherCondition.TEMPERATURE_ABOVE, threshold, unit
-            return WeatherCondition.TEMPERATURE_BELOW, threshold, unit
+                return WeatherCondition.TEMPERATURE_ABOVE, threshold, None, unit
+            return WeatherCondition.TEMPERATURE_BELOW, threshold, None, unit
 
         # ── Snow ──────────────────────────────────────────────────────────────
         if any(w in q_lower for w in ["snow", "blizzard", "snowfall", "snowstorm"]):
             threshold, unit = self._extract_numeric_threshold(question)
-            return WeatherCondition.SNOW, threshold, unit
+            return WeatherCondition.SNOW, threshold, None, unit
 
         # ── Rain / precipitation ──────────────────────────────────────────────
         if any(w in q_lower for w in ["rain", "rainfall", "precipitation", "wet"]):
             threshold, unit = self._extract_numeric_threshold(question)
-            return WeatherCondition.RAIN, threshold, unit
+            return WeatherCondition.RAIN, threshold, None, unit
 
         # ── Storm ─────────────────────────────────────────────────────────────
         if any(w in q_lower for w in ["storm", "thunder", "lightning"]):
-            return WeatherCondition.STORM, None, None
+            return WeatherCondition.STORM, None, None, None
 
         # ── Wind ──────────────────────────────────────────────────────────────
         if any(w in q_lower for w in ["wind", "gust", "mph", "km/h", "knots"]):
@@ -380,13 +371,13 @@ class WeatherMarketParser:
             if unit == "mph" and threshold is not None:
                 threshold = threshold * 1.60934
                 unit = "km/h"
-            return WeatherCondition.WIND_ABOVE, threshold, unit
+            return WeatherCondition.WIND_ABOVE, threshold, None, unit
 
         # ── Sunny / clear / dry ───────────────────────────────────────────────
         if any(w in q_lower for w in ["sunny", "sun", "clear", "dry", "no rain"]):
-            return WeatherCondition.SUNNY, None, None
+            return WeatherCondition.SUNNY, None, None, None
 
-        return WeatherCondition.UNKNOWN, None, None
+        return WeatherCondition.UNKNOWN, None, None, None
 
     def _extract_numeric_threshold(
         self, question: str
