@@ -19,21 +19,16 @@ We use KELLY_FRACTION * f* (default 25%) to be conservative.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from loguru import logger
 
+from core.env_utils import env_float as _env_float, env_int as _env_int
 from core.models import BotMode, Market, Position, PortfolioState, Side
 
 # ── Fee constants ─────────────────────────────────────────────────────────────
 POLYMARKET_FEE_RATE = 0.02   # 2% per trade (taker)
 GAS_USD = 0.05               # approximate Polygon gas per tx
-
-# ── Risk parameters (from env with defaults) ──────────────────────────────────
-
-def _env_float(key: str, default: float) -> float:
-    return float(os.getenv(key, str(default)))
 
 
 @dataclass
@@ -51,23 +46,25 @@ class RiskParams:
     min_liquidity_usd: float     # minimum market liquidity to trade
     min_market_price: float      # minimum price on either side (filters broken/dead markets)
     max_market_price: float      # maximum price on either side (= 1 - min_market_price)
+    max_entries_per_cycle: int   # cap nuevas entradas por ciclo (evita ráfagas en arranque)
 
 
 def load_risk_params() -> RiskParams:
     return RiskParams(
-        min_edge=_env_float("MIN_EDGE", 0.05),
+        min_edge=_env_float("MIN_EDGE", 0.08),
         kelly_fraction=_env_float("KELLY_FRACTION", 0.25),
-        max_position_pct=_env_float("MAX_POSITION_PCT", 0.08),
-        max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "10")),
-        max_portfolio_risk=_env_float("MAX_PORTFOLIO_RISK", 0.50),
+        max_position_pct=_env_float("MAX_POSITION_PCT", 0.05),
+        max_open_positions=_env_int("MAX_OPEN_POSITIONS", 6),
+        max_portfolio_risk=_env_float("MAX_PORTFOLIO_RISK", 0.35),
         daily_loss_limit=_env_float("DAILY_LOSS_LIMIT", 0.10),
         drawdown_limit=_env_float("DRAWDOWN_LIMIT", 0.25),
         stop_loss_pct=_env_float("STOP_LOSS_PCT", 0.40),
         take_profit_pct=_env_float("TAKE_PROFIT_PCT", 0.40),
         min_position_usd=_env_float("MIN_POSITION_USD", 5.0),
-        min_liquidity_usd=_env_float("MIN_LIQUIDITY_USD", 500.0),
+        min_liquidity_usd=_env_float("MIN_LIQUIDITY_USD", 1000.0),
         min_market_price=_env_float("MIN_MARKET_PRICE", 0.05),
         max_market_price=_env_float("MAX_MARKET_PRICE", 0.95),
+        max_entries_per_cycle=_env_int("MAX_ENTRIES_PER_CYCLE", 2),
     )
 
 

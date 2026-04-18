@@ -139,11 +139,13 @@ class PolymarketClient:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
 
-            key = os.getenv("POLY_PRIVATE_KEY", "")
-            api_key = os.getenv("POLY_API_KEY", "")
-            secret = os.getenv("POLY_API_SECRET", "")
-            passphrase = os.getenv("POLY_API_PASSPHRASE", "")
-            chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
+            from core.env_utils import env_int, env_str
+
+            key = env_str("POLY_PRIVATE_KEY", "")
+            api_key = env_str("POLY_API_KEY", "")
+            secret = env_str("POLY_API_SECRET", "")
+            passphrase = env_str("POLY_API_PASSPHRASE", "")
+            chain_id = env_int("POLY_CHAIN_ID", 137)
 
             if not key:
                 logger.warning("POLY_PRIVATE_KEY not set – trading disabled.")

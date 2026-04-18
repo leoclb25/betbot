@@ -10,7 +10,6 @@ actual orders are placed.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -19,6 +18,7 @@ from uuid import uuid4
 import requests
 from loguru import logger
 
+from core.env_utils import env_float
 from core.models import BotMode, Market, OrderSide, Position, PositionStatus, Side, Trade
 from core.polymarket.client import FEE_RATE, GAMMA_API, _parse_market, gamma_fetch_market_by_condition_id
 
@@ -29,7 +29,7 @@ def _load_state() -> dict:
     if STATE_FILE.exists():
         with STATE_FILE.open() as f:
             return json.load(f)
-    initial_balance = float(os.getenv("PAPER_INITIAL_BALANCE", "100.0"))
+    initial_balance = env_float("PAPER_INITIAL_BALANCE", 100.0)
     return {
         "cash_usd": initial_balance,
         "peak_value_usd": initial_balance,

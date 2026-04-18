@@ -108,12 +108,22 @@ class BaseBot(ABC):
         # 3. Scan for new opportunities (if not paused)
         if not self._trading_paused:
             markets = self.scan_markets()
+            entries_this_cycle = 0
+            max_entries = self.risk.params.max_entries_per_cycle
 
             for market in markets:
+                if max_entries > 0 and entries_this_cycle >= max_entries:
+                    logger.debug(
+                        f"[{self.mode.value.upper()}] entry cap reached "
+                        f"({entries_this_cycle}/{max_entries}) — skipping remaining candidates"
+                    )
+                    break
                 try:
                     signal = self.evaluate_market(market)
                     # Pass market directly to avoid a redundant re-fetch
-                    self._act_on_signal(signal, state, market=market)
+                    entered = self._act_on_signal(signal, state, market=market)
+                    if entered:
+                        entries_this_cycle += 1
                 except Exception as exc:
                     logger.error(f"Error evaluating market {market.condition_id}: {exc}")
                     self.logger.log_bot_event(
@@ -143,10 +153,14 @@ class BaseBot(ABC):
         signal: BotSignal,
         state: PortfolioState,
         market: Optional[Market] = None,
-    ) -> None:
-        """Execute an ENTER signal (SKIP and HOLD are no-ops here)."""
+    ) -> bool:
+        """
+        Execute an ENTER signal (SKIP and HOLD are no-ops here).
+
+        Returns True si se ejecutó la entrada, False en cualquier otro caso.
+        """
         if signal.action != SignalAction.ENTER:
-            return
+            return False
 
         # Use the market passed in (avoids a redundant API call)
         resolved_market = market or self._get_market_for_signal(signal)
@@ -161,9 +175,10 @@ class BaseBot(ABC):
             is_trading_paused=self._trading_paused,
         )
         if not allowed:
-            return
+            return False
 
         self._execute_entry(signal, market=resolved_market)
+        return True
 
     def _execute_entry(self, signal: BotSignal, market: Optional[Market] = None) -> None:
         """To be implemented by subclasses that need custom entry logic."""

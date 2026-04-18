@@ -20,7 +20,6 @@ true_probability  = 0.5 + (raw - 0.5) * confidence
 
 from __future__ import annotations
 
-import os
 import random
 import time
 from datetime import date, datetime, timezone
@@ -34,18 +33,15 @@ from core.models import EnsembleForecast, WeatherCondition, WeatherProbability
 
 # ── Rate-limiting config ──────────────────────────────────────────────────────
 
+from core.env_utils import env_float as _env_float_raw, env_int as _env_int_raw
+
+
 def _env_float(key: str, default: str) -> float:
-    try:
-        return float(os.getenv(key, default))
-    except ValueError:
-        return float(default)
+    return _env_float_raw(key, float(default))
 
 
 def _env_int(key: str, default: str) -> int:
-    try:
-        return int(os.getenv(key, default))
-    except ValueError:
-        return int(default)
+    return _env_int_raw(key, int(default))
 
 
 ENSEMBLE_MIN_INTERVAL_SEC  = _env_float("OPEN_METEO_ENSEMBLE_MIN_INTERVAL", "2.25")
@@ -489,11 +485,19 @@ class WeatherClient:
         agreement_factor = 0.60 + 0.40 * agreement
         confidence = base_decay * agreement_factor
 
-        # Extra penalty for narrow range markets (threshold to threshold_high)
+        # Extra penalty for narrow range markets — el ensemble es ruidoso a
+        # menor resolución que su spread natural (~1-2°C entre miembros).
+        # Para rangos de 1°F (~0.56°C) cortamos la confianza a la mitad.
+        effective_range_c: Optional[float] = None
         if threshold_high is not None and threshold is not None:
-            range_c = abs(threshold_high - threshold)
-            # A 1°F = 0.56°C range gets ~15% extra shrinkage; wider ranges less
-            range_penalty = max(0.70, 1.0 - (0.56 / max(range_c, 0.1)) * 0.15)
+            effective_range_c = abs(threshold_high - threshold)
+        elif condition == WeatherCondition.TEMPERATURE_EXACT and threshold is not None:
+            # _raw_probability usa ventana ±0.5°C cuando no hay rango explícito
+            effective_range_c = 1.0
+
+        if effective_range_c is not None:
+            # 1°F (0.56°C) → 40% shrinkage; 2°F (1.1°C) → 20%; 4°F+ → casi nada
+            range_penalty = max(0.40, 1.0 - (0.56 / max(effective_range_c, 0.1)) * 0.40)
             confidence = confidence * range_penalty
 
         confidence = max(0.10, min(1.0, confidence))

@@ -11,7 +11,6 @@ Wires together:
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from typing import Union
 
@@ -19,6 +18,7 @@ from loguru import logger
 
 from bots.base import BaseBot
 from bots.weather.strategy import WeatherStrategy
+from core.env_utils import env_int
 from core.models import BotMode, BotSignal, Market, OrderSide, PortfolioState, Position, SignalAction
 from core.portfolio.logger import OperationsLogger
 from core.portfolio.tracker import PortfolioTracker
@@ -101,7 +101,7 @@ class WeatherBot(BaseBot):
         tracker = PortfolioTracker(client)
         ops_logger = OperationsLogger(mode)
 
-        scan_interval = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
+        scan_interval = env_int("SCAN_INTERVAL_SECONDS", 3600)
 
         return cls(
             client=client,
@@ -116,8 +116,8 @@ class WeatherBot(BaseBot):
 
     def scan_markets(self) -> list[Market]:
         """Fetch active weather markets from Polymarket."""
-        max_days = int(os.getenv("MAX_DAYS_TO_RESOLUTION", "7"))
-        min_days = int(os.getenv("MIN_DAYS_TO_RESOLUTION", "0"))
+        max_days = env_int("MAX_DAYS_TO_RESOLUTION", 7)
+        min_days = env_int("MIN_DAYS_TO_RESOLUTION", 0)
 
         all_markets = self.client.get_markets(keywords=self._keywords, limit=200)
 
