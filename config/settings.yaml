@@ -54,3 +54,17 @@ bots:
       - "fahrenheit"
     # Precipitation threshold to consider "rain event" (mm)
     rain_threshold_mm: 0.5
+
+  crypto:
+    binance_api_base: "https://api.binance.com/api/v3"
+    default_btc_volatility_per_min: 0.0006
+    default_eth_volatility_per_min: 0.0008
+    keywords:
+      - "btc"
+      - "bitcoin"
+      - "eth"
+      - "ethereum"
+      - "price"
+      - "above"
+      - "below"
+      - "crypto"

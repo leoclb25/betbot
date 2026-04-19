@@ -29,9 +29,16 @@ from pathlib import Path
 
 # Repo root (…/betbot) — rutas de datos no dependen del cwd
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-PAPER_STATE = _REPO_ROOT / "data" / "paper_portfolio.json"
-OPS_LOG = _REPO_ROOT / "data" / "logs" / "operations.jsonl"
-BALANCE_SUMMARY = _REPO_ROOT / "data" / "logs" / "balance_summary.json"
+PAPER_STATES = {
+    "weather": _REPO_ROOT / "data" / "weather_paper_portfolio.json",
+    "crypto":  _REPO_ROOT / "data" / "crypto_paper_portfolio.json",
+}
+BALANCE_SUMMARIES = {
+    "weather": _REPO_ROOT / "data" / "logs" / "weather_balance_summary.json",
+    "crypto":  _REPO_ROOT / "data" / "logs" / "crypto_balance_summary.json",
+}
+# Legacy paths (kept for paper-reset --with-logs)
+OPS_LOG = _REPO_ROOT / "data" / "logs" / "weather_operations.jsonl"
 BOT_LOG = _REPO_ROOT / "data" / "logs" / "bot.log"
 
 
@@ -62,15 +69,25 @@ def _paper_reset_stdlib(argv: list[str]) -> int:
 
     parser = argparse.ArgumentParser(prog="python -m scripts.run paper-reset")
     parser.add_argument("-y", "--yes", action="store_true", help="No pedir confirmación")
+    parser.add_argument("--bot", default="all", choices=["weather", "crypto", "all"])
     parser.add_argument("--with-logs", action="store_true", help="Borrar operations.jsonl y balance_summary")
     parser.add_argument("--bot-log", action="store_true", help="Borrar bot.log")
     args = parser.parse_args(argv)
 
+    bots = ["weather", "crypto"] if args.bot == "all" else [args.bot]
+
     to_remove: list[Path] = []
-    if PAPER_STATE.exists():
-        to_remove.append(PAPER_STATE)
-    if args.with_logs:
-        to_remove.extend(p for p in (OPS_LOG, BALANCE_SUMMARY) if p.exists())
+    for b in bots:
+        p = PAPER_STATES[b]
+        if p.exists():
+            to_remove.append(p)
+        if args.with_logs:
+            summary = BALANCE_SUMMARIES[b]
+            if summary.exists():
+                to_remove.append(summary)
+            ops = _REPO_ROOT / "data" / "logs" / f"{b}_operations.jsonl"
+            if ops.exists():
+                to_remove.append(ops)
     if args.bot_log and BOT_LOG.exists():
         to_remove.append(BOT_LOG)
 
@@ -92,30 +109,12 @@ def _paper_reset_stdlib(argv: list[str]) -> int:
             p.unlink()
             removed.append(str(p))
         except PermissionError:
-            print(
-                f"Permission denied: {p}\n\n"
-                "Si el setup dejó data/ con dueño betbot, ubuntu no puede borrarlo.\n"
-                "Ejecutá el mismo comando con sudo, por ejemplo:\n"
-                "  sudo python3 -m scripts.run paper-reset -y --with-logs --bot-log\n\n"
-                "O como betbot (sin cambiar dueños):\n"
-                "  sudo -u betbot rm -f data/paper_portfolio.json data/logs/operations.jsonl "
-                "data/logs/balance_summary.json data/logs/bot.log"
-            )
+            print(f"Permission denied: {p}\nTry: sudo python3 -m scripts.run paper-reset -y")
             return 1
 
     print("Paper reset complete. Removed:")
     for r in removed:
         print(f"  • {r}")
-
-    if PAPER_STATE in to_remove:
-        initial = os.environ.get("PAPER_INITIAL_BALANCE") or _read_env_key(
-            _REPO_ROOT / ".env", "PAPER_INITIAL_BALANCE"
-        ) or "100.0"
-        try:
-            bal = float(initial)
-        except ValueError:
-            bal = 100.0
-        print(f"\nNext paper run will start with ${bal:.2f} cash (PAPER_INITIAL_BALANCE).")
     return 0
 
 
@@ -229,7 +228,7 @@ def weather(mode: str, once: bool, interval: int | None) -> None:
     bot.run(run_once=once)
 
 
-# ── status command ────────────────────────────────────────────────────────────
+# ── crypto command ────────────────────────────────────────────────────────────
 
 @cli.command()
 @click.option(
@@ -237,12 +236,54 @@ def weather(mode: str, once: bool, interval: int | None) -> None:
     type=click.Choice(["paper", "live"], case_sensitive=False),
     default="paper",
     show_default=True,
+    help="Trading mode: paper (simulation) or live (real wallet).",
 )
-def status(mode: str) -> None:
-    """Show current portfolio balance summary."""
-    summary_path = BALANCE_SUMMARY
+@click.option("--once", is_flag=True, default=False, help="Run a single scan cycle and exit.")
+@click.option("--interval", default=None, type=int, help="Override CRYPTO_SCAN_INTERVAL_SECONDS.")
+def crypto(mode: str, once: bool, interval: int | None) -> None:
+    """Run the crypto price prediction market bot."""
+    import os
+    if interval is not None:
+        os.environ["CRYPTO_SCAN_INTERVAL_SECONDS"] = str(interval)
+
+    from core.models import BotMode
+    from bots.crypto.bot import CryptoBot
+
+    bot_mode = BotMode.PAPER if mode == "paper" else BotMode.LIVE
+
+    if bot_mode == BotMode.LIVE:
+        private_key = os.getenv("POLY_PRIVATE_KEY", "")
+        if not private_key or private_key.startswith("0xyour_"):
+            console.print(
+                Panel(
+                    "[red bold]Live mode requires POLY_PRIVATE_KEY in .env[/]\n"
+                    "Run in [yellow]paper[/] mode first to validate the strategy.",
+                    title="[red]Configuration Error[/]",
+                )
+            )
+            sys.exit(1)
+
+    console.print(
+        Panel(
+            f"[bold]Mode:[/] [cyan]{mode.upper()}[/]\n"
+            f"[bold]Bot:[/]  Crypto Price Markets (BTC/ETH)\n"
+            f"[bold]Scan:[/] every {os.getenv('CRYPTO_SCAN_INTERVAL_SECONDS', '300')}s\n"
+            + ("[yellow]Run once[/] then exit." if once else "[green]Running continuously[/] (Ctrl+C to stop)."),
+            title="[bold blue]BetBot – Crypto[/]",
+            box=box.ROUNDED,
+        )
+    )
+
+    bot = CryptoBot.create(bot_mode)
+    bot.run(run_once=once)
+
+
+# ── status command ────────────────────────────────────────────────────────────
+
+def _show_bot_status(bot_name: str) -> None:
+    summary_path = BALANCE_SUMMARIES[bot_name]
     if not summary_path.exists():
-        console.print("[yellow]No balance summary found. Run the bot first.[/]")
+        console.print(f"[yellow]No balance summary for {bot_name} bot. Run it first.[/]")
         return
 
     with summary_path.open() as f:
@@ -252,7 +293,7 @@ def status(mode: str) -> None:
     pnl_color = "green" if pnl >= 0 else "red"
     pnl_sign = "+" if pnl >= 0 else ""
 
-    table = Table(title="Portfolio Summary", box=box.SIMPLE_HEAVY)
+    table = Table(title=f"{bot_name.capitalize()} Portfolio Summary", box=box.SIMPLE_HEAVY)
     table.add_column("Metric", style="bold")
     table.add_column("Value", justify="right")
 
@@ -261,10 +302,7 @@ def status(mode: str) -> None:
     table.add_row("Cash", f"${s.get('cash_usd', 0):.2f}")
     table.add_row("Open Positions Value", f"${s.get('open_positions_value_usd', 0):.2f}")
     table.add_row("Total Value", f"[bold]${s.get('total_value_usd', 0):.2f}[/bold]")
-    table.add_row(
-        "Total P&L",
-        f"[{pnl_color}]{pnl_sign}${pnl:.2f}[/{pnl_color}]",
-    )
+    table.add_row("Total P&L", f"[{pnl_color}]{pnl_sign}${pnl:.2f}[/{pnl_color}]")
     table.add_row("Realized P&L", f"${s.get('realized_pnl_usd', 0):.2f}")
     table.add_row("Unrealized P&L", f"${s.get('unrealized_pnl_usd', 0):.2f}")
     table.add_row("Peak Value", f"${s.get('peak_value_usd', 0):.2f}")
@@ -274,14 +312,13 @@ def status(mode: str) -> None:
     table.add_row(
         "Win Rate",
         f"{s.get('win_rate', 0)*100:.1f}% "
-        f"({s.get('winning_trades',0)}W / {s.get('losing_trades',0)}L)",
+        f"({s.get('winning_trades', 0)}W / {s.get('losing_trades', 0)}L)",
     )
-
     console.print(table)
 
-    # ── Open positions detail ─────────────────────────────────────────────────
-    if PAPER_STATE.exists():
-        with PAPER_STATE.open() as f:
+    paper_state = PAPER_STATES[bot_name]
+    if paper_state.exists():
+        with paper_state.open() as f:
             portfolio = json.load(f)
 
         open_pos = [
@@ -290,7 +327,6 @@ def status(mode: str) -> None:
         ]
 
         if open_pos:
-            # Fetch live prices from Gamma API for each open position
             import requests as _requests
             _session = _requests.Session()
             _session.headers.update({"Accept": "application/json"})
@@ -352,7 +388,6 @@ def status(mode: str) -> None:
                     price_str  = f"{live_price:.4f}"
                     live_label = ""
                 else:
-                    # fallback to entry price
                     gross = shares * entry_price
                     net   = gross * (1 - FEE)
                     pnl   = net - entry_amt
@@ -369,13 +404,8 @@ def status(mode: str) -> None:
                 end_str    = end_raw[:10] if end_raw else "?"
 
                 pos_table.add_row(
-                    str(i),
-                    side,
-                    opened_str,
-                    end_str,
-                    f"${entry_amt:.2f}",
-                    f"{shares:.2f}",
-                    f"{entry_price:.4f}",
+                    str(i), side, opened_str, end_str,
+                    f"${entry_amt:.2f}", f"{shares:.2f}", f"{entry_price:.4f}",
                     f"{price_str} {live_label}",
                     f"[{pnl_color}]{pnl_sign}${pnl:.2f}[/{pnl_color}]",
                     f"{edge*100:.1f}%",
@@ -388,6 +418,28 @@ def status(mode: str) -> None:
             console.print(
                 f"  P&L total si cierras todo ahora: [{color}]{sign}${total_live_pnl:.2f}[/{color}]"
             )
+
+
+@cli.command()
+@click.option(
+    "--bot",
+    type=click.Choice(["weather", "crypto", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+)
+def status(bot: str) -> None:
+    """Show current portfolio balance summary.
+
+    Examples:
+
+    \b
+      python -m scripts.run status                   # both bots
+      python -m scripts.run status --bot weather     # weather only
+      python -m scripts.run status --bot crypto      # crypto only
+    """
+    bots_to_show = ["weather", "crypto"] if bot == "all" else [bot]
+    for b in bots_to_show:
+        _show_bot_status(b)
 
 
 # ── operations command ────────────────────────────────────────────────────────
@@ -445,31 +497,32 @@ def operations(tail: int, event_filter: str | None) -> None:
 
 
 @cli.command("paper-reset")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
 @click.option(
-    "--yes",
-    "-y",
-    is_flag=True,
-    help="Skip confirmation (useful for scripts).",
+    "--bot",
+    type=click.Choice(["weather", "crypto", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+    help="Which bot's portfolio to reset.",
 )
-@click.option(
-    "--with-logs",
-    is_flag=True,
-    help="Also delete data/logs/operations.jsonl and balance_summary.json.",
-)
-@click.option(
-    "--bot-log",
-    is_flag=True,
-    help="Also delete data/logs/bot.log.",
-)
-def paper_reset(yes: bool, with_logs: bool, bot_log: bool) -> None:
-    """Remove paper portfolio file so the next run starts with a fresh virtual balance."""
-    import os
+@click.option("--with-logs", is_flag=True, help="Also delete operations and balance_summary files.")
+@click.option("--bot-log", is_flag=True, help="Also delete data/logs/bot.log.")
+def paper_reset(yes: bool, bot: str, with_logs: bool, bot_log: bool) -> None:
+    """Remove paper portfolio file(s) so the next run starts with a fresh virtual balance."""
+    bots_to_reset = ["weather", "crypto"] if bot == "all" else [bot]
 
     to_remove: list[Path] = []
-    if PAPER_STATE.exists():
-        to_remove.append(PAPER_STATE)
-    if with_logs:
-        to_remove.extend(p for p in (OPS_LOG, BALANCE_SUMMARY) if p.exists())
+    for b in bots_to_reset:
+        p = PAPER_STATES[b]
+        if p.exists():
+            to_remove.append(p)
+        if with_logs:
+            summary = BALANCE_SUMMARIES[b]
+            if summary.exists():
+                to_remove.append(summary)
+            ops = _REPO_ROOT / "data" / "logs" / f"{b}_operations.jsonl"
+            if ops.exists():
+                to_remove.append(ops)
     if bot_log and BOT_LOG.exists():
         to_remove.append(BOT_LOG)
 
@@ -491,24 +544,16 @@ def paper_reset(yes: bool, with_logs: bool, bot_log: bool) -> None:
         except PermissionError:
             console.print(
                 "[red]Permission denied[/] al borrar "
-                f"[dim]{p}[/]. Probá con [bold]sudo[/] o borrá como [bold]betbot[/]:\n"
-                "[dim]sudo python3 -m scripts.run paper-reset -y --with-logs --bot-log[/]"
+                f"[dim]{p}[/]. Probá con [bold]sudo[/]:\n"
+                "[dim]sudo python3 -m scripts.run paper-reset -y[/]"
             )
             raise SystemExit(1)
 
-    initial = os.getenv("PAPER_INITIAL_BALANCE", "100.0")
-    tail = ""
-    if PAPER_STATE in to_remove:
-        tail = (
-            f"\n\nNext [cyan]paper[/] run will start with [bold]${float(initial):.2f}[/] cash "
-            f"([dim]PAPER_INITIAL_BALANCE[/])."
-        )
     console.print(
         Panel(
             f"[green]Paper reset complete.[/]\n\n"
             f"Removed:\n"
-            + "\n".join(f"  • [dim]{r}[/]" for r in removed)
-            + tail,
+            + "\n".join(f"  • [dim]{r}[/]" for r in removed),
             title="[bold]paper-reset[/]",
             box=box.ROUNDED,
         )

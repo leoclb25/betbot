@@ -22,28 +22,6 @@ from core.env_utils import env_float
 from core.models import BotMode, Market, OrderSide, Position, PositionStatus, Side, Trade
 from core.polymarket.client import FEE_RATE, GAMMA_API, _parse_market, gamma_fetch_market_by_condition_id
 
-STATE_FILE = Path("data/paper_portfolio.json")
-
-
-def _load_state() -> dict:
-    if STATE_FILE.exists():
-        with STATE_FILE.open() as f:
-            return json.load(f)
-    initial_balance = env_float("PAPER_INITIAL_BALANCE", 100.0)
-    return {
-        "cash_usd": initial_balance,
-        "peak_value_usd": initial_balance,
-        "positions": {},   # position_id → dict
-        "trades": [],
-    }
-
-
-def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with STATE_FILE.open("w") as f:
-        json.dump(state, f, indent=2, default=str)
-
-
 class PaperClient:
     """
     Paper trading client.
@@ -52,15 +30,38 @@ class PaperClient:
     public API. No real money is used.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        state_file: Path = Path("data/paper_portfolio.json"),
+        initial_balance_key: str = "PAPER_INITIAL_BALANCE",
+    ) -> None:
         self.mode = BotMode.PAPER
-        self._state = _load_state()
+        self._state_file = state_file
+        self._initial_balance_key = initial_balance_key
+        self._state = self._load_state()
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
         logger.info(
             f"[PAPER] Initialized with ${self._state['cash_usd']:.2f} cash | "
             f"{len(self._state['positions'])} open positions"
         )
+
+    def _load_state(self) -> dict:
+        if self._state_file.exists():
+            with self._state_file.open() as f:
+                return json.load(f)
+        initial_balance = env_float(self._initial_balance_key, 100.0)
+        return {
+            "cash_usd": initial_balance,
+            "peak_value_usd": initial_balance,
+            "positions": {},
+            "trades": [],
+        }
+
+    def _save_state(self) -> None:
+        self._state_file.parent.mkdir(parents=True, exist_ok=True)
+        with self._state_file.open("w") as f:
+            json.dump(self._state, f, indent=2, default=str)
 
     # ── Market data (delegates to real API) ──────────────────────────────────
 
@@ -168,7 +169,7 @@ class PaperClient:
         )
 
         self._state["trades"].append(trade.model_dump())
-        _save_state(self._state)
+        self._save_state()
 
         logger.debug(
             f"[PAPER] {order_side.value} {side.value} | {market.question[:60]} | "
@@ -204,7 +205,7 @@ class PaperClient:
             mode=BotMode.PAPER,
         )
         self._state["positions"][position_id] = position.model_dump()
-        _save_state(self._state)
+        self._save_state()
         return trade, position
 
     def close_position(
@@ -256,7 +257,7 @@ class PaperClient:
 
         self._state["trades"].append(sell_trade.model_dump())
         self._state["positions"][position.position_id] = closed.model_dump()
-        _save_state(self._state)
+        self._save_state()
 
         pnl_sign = "+" if pnl_usd >= 0 else ""
         logger.info(
@@ -268,4 +269,4 @@ class PaperClient:
     def update_peak(self, total_value: float) -> None:
         if total_value > self._state["peak_value_usd"]:
             self._state["peak_value_usd"] = total_value
-            _save_state(self._state)
+            self._save_state()

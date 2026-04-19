@@ -23,6 +23,8 @@ from dataclasses import dataclass
 
 from loguru import logger
 
+import os
+
 from core.env_utils import env_float as _env_float, env_int as _env_int
 from core.models import BotMode, Market, Position, PortfolioState, Side
 
@@ -49,22 +51,36 @@ class RiskParams:
     max_entries_per_cycle: int   # cap nuevas entradas por ciclo (evita ráfagas en arranque)
 
 
-def load_risk_params() -> RiskParams:
+def load_risk_params(prefix: str = "") -> RiskParams:
+    def _f(base: str, default: float) -> float:
+        if prefix:
+            key = f"{prefix}_{base}"
+            if os.environ.get(key) is not None:
+                return _env_float(key, default)
+        return _env_float(base, default)
+
+    def _i(base: str, default: int) -> int:
+        if prefix:
+            key = f"{prefix}_{base}"
+            if os.environ.get(key) is not None:
+                return _env_int(key, default)
+        return _env_int(base, default)
+
     return RiskParams(
-        min_edge=_env_float("MIN_EDGE", 0.08),
-        kelly_fraction=_env_float("KELLY_FRACTION", 0.25),
-        max_position_pct=_env_float("MAX_POSITION_PCT", 0.05),
-        max_open_positions=_env_int("MAX_OPEN_POSITIONS", 6),
-        max_portfolio_risk=_env_float("MAX_PORTFOLIO_RISK", 0.35),
-        daily_loss_limit=_env_float("DAILY_LOSS_LIMIT", 0.10),
-        drawdown_limit=_env_float("DRAWDOWN_LIMIT", 0.25),
-        stop_loss_pct=_env_float("STOP_LOSS_PCT", 0.40),
-        take_profit_pct=_env_float("TAKE_PROFIT_PCT", 0.40),
-        min_position_usd=_env_float("MIN_POSITION_USD", 5.0),
-        min_liquidity_usd=_env_float("MIN_LIQUIDITY_USD", 1000.0),
-        min_market_price=_env_float("MIN_MARKET_PRICE", 0.05),
-        max_market_price=_env_float("MAX_MARKET_PRICE", 0.95),
-        max_entries_per_cycle=_env_int("MAX_ENTRIES_PER_CYCLE", 2),
+        min_edge=_f("MIN_EDGE", 0.08),
+        kelly_fraction=_f("KELLY_FRACTION", 0.25),
+        max_position_pct=_f("MAX_POSITION_PCT", 0.05),
+        max_open_positions=_i("MAX_OPEN_POSITIONS", 6),
+        max_portfolio_risk=_f("MAX_PORTFOLIO_RISK", 0.35),
+        daily_loss_limit=_f("DAILY_LOSS_LIMIT", 0.10),
+        drawdown_limit=_f("DRAWDOWN_LIMIT", 0.25),
+        stop_loss_pct=_f("STOP_LOSS_PCT", 0.40),
+        take_profit_pct=_f("TAKE_PROFIT_PCT", 0.40),
+        min_position_usd=_f("MIN_POSITION_USD", 5.0),
+        min_liquidity_usd=_f("MIN_LIQUIDITY_USD", 1000.0),
+        min_market_price=_f("MIN_MARKET_PRICE", 0.05),
+        max_market_price=_f("MAX_MARKET_PRICE", 0.95),
+        max_entries_per_cycle=_i("MAX_ENTRIES_PER_CYCLE", 2),
     )
 
 

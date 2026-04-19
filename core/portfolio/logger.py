@@ -17,8 +17,6 @@ from pathlib import Path
 from core.models import BotMode, PortfolioState, Trade
 
 LOGS_DIR = Path("data/logs")
-OPERATIONS_FILE = LOGS_DIR / "operations.jsonl"
-BALANCE_SUMMARY_FILE = LOGS_DIR / "balance_summary.json"
 
 
 def _ensure_logs_dir() -> None:
@@ -28,9 +26,12 @@ def _ensure_logs_dir() -> None:
 class OperationsLogger:
     """Writes trade and portfolio events to the log files."""
 
-    def __init__(self, mode: BotMode) -> None:
+    def __init__(self, mode: BotMode, bot_name: str = "weather") -> None:
         self.mode = mode
+        self._bot_name = bot_name
         _ensure_logs_dir()
+        self._ops_file = LOGS_DIR / f"{bot_name}_operations.jsonl"
+        self._summary_file = LOGS_DIR / f"{bot_name}_balance_summary.json"
 
     # ── Operations log ───────────────────────────────────────────────────────
 
@@ -132,11 +133,12 @@ class OperationsLogger:
             "losing_trades": state.losing_trades,
             "win_rate": round(state.win_rate, 4),
         }
-        with BALANCE_SUMMARY_FILE.open("w") as f:
+        with self._summary_file.open("w") as f:
             json.dump(summary, f, indent=2)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _append(self, record: dict) -> None:
-        with OPERATIONS_FILE.open("a") as f:
+        record.setdefault("bot", self._bot_name)
+        with self._ops_file.open("a") as f:
             f.write(json.dumps(record) + "\n")

@@ -89,7 +89,17 @@ class WeatherBot(BaseBot):
 
         # Client
         if mode == BotMode.PAPER:
-            client: Union[PolymarketClient, PaperClient] = PaperClient()
+            from pathlib import Path as _Path
+            weather_state = _Path("data/weather_paper_portfolio.json")
+            old_state = _Path("data/paper_portfolio.json")
+            if not weather_state.exists() and old_state.exists():
+                import shutil
+                shutil.move(str(old_state), str(weather_state))
+                logger.info("[WEATHER] Migrated paper_portfolio.json → weather_paper_portfolio.json")
+            client: Union[PolymarketClient, PaperClient] = PaperClient(
+                state_file=weather_state,
+                initial_balance_key="WEATHER_PAPER_INITIAL_BALANCE",
+            )
         else:
             client = PolymarketClient()
 
@@ -99,7 +109,7 @@ class WeatherBot(BaseBot):
         parser = WeatherMarketParser(weather_client)
         strategy = WeatherStrategy(weather_client, parser, risk_manager)
         tracker = PortfolioTracker(client)
-        ops_logger = OperationsLogger(mode)
+        ops_logger = OperationsLogger(mode, bot_name="weather")
 
         scan_interval = env_int("SCAN_INTERVAL_SECONDS", 3600)
 

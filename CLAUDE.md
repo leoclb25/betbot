@@ -34,19 +34,21 @@ Diseñado para escalar: cada nuevo bot vive en `bots/<nombre>/` y extiende `Base
 ## Arquitectura en capas
 
 ```
-scripts/run.py          ← CLI entry point (click)
+scripts/run.py              ← CLI entry point (click)
     ↓
-bots/<nombre>/bot.py    ← Orquestador del bot (extiende BaseBot)
-    ↓ usa
-bots/<nombre>/strategy.py  ← Lógica de entrada/salida
-bots/<nombre>/parser.py    ← Parsea preguntas del mercado → struct
-    ↓ usa
-core/weather/client.py     ← Datos de clima (Open-Meteo)
-core/risk/manager.py       ← Kelly, sizing, stop-loss, pausas
-core/polymarket/client.py  ← API live (o paper_client.py)
-core/portfolio/tracker.py  ← Estado del portfolio
-core/portfolio/logger.py   ← Escribe operations.jsonl y balance_summary.json
-core/models.py             ← Todos los tipos de datos compartidos
+bots/weather/bot.py         ← WeatherBot (extiende BaseBot)
+bots/crypto/bot.py          ← CryptoBot  (extiende BaseBot)
+    ↓ cada uno usa
+bots/<nombre>/strategy.py   ← Lógica de entrada/salida
+bots/<nombre>/parser.py     ← Parsea preguntas del mercado → struct
+    ↓ que usan
+core/weather/client.py      ← Datos de clima (Open-Meteo ensemble)
+core/crypto/price_client.py ← Datos Binance (spot, 24h stats, order book)
+core/risk/manager.py        ← Kelly, sizing, stop-loss, pausas
+core/polymarket/client.py   ← API live (o paper_client.py — uno por bot)
+core/portfolio/tracker.py   ← Estado del portfolio
+core/portfolio/logger.py    ← Escribe {bot}_operations.jsonl y {bot}_balance_summary.json
+core/models.py              ← Todos los tipos de datos compartidos
 ```
 
 ---
@@ -88,19 +90,23 @@ core/models.py             ← Todos los tipos de datos compartidos
 ### Ejemplo de bots futuros posibles
 - `bots/sports/` – mercados deportivos, usando APIs de odds/stats
 - `bots/politics/` – mercados electorales, usando polls/modelos
-- `bots/crypto/` – mercados de precio de crypto, usando on-chain data
 - `bots/arb/` – arbitraje entre mercados relacionados
 
 ---
 
 ## Archivos de output (generados en runtime)
 
-| Archivo | Descripción |
-|---|---|
-| `data/paper_portfolio.json` | Estado del portfolio paper (posiciones, cash, trades) |
-| `data/logs/operations.jsonl` | Log append-only de todas las operaciones |
-| `data/logs/balance_summary.json` | Snapshot del balance (se sobreescribe) |
-| `data/logs/bot.log` | Log completo del proceso (rotación 10MB) |
+Cada bot tiene sus propios archivos — son completamente independientes:
+
+| Archivo | Bot | Descripción |
+|---|---|---|
+| `data/weather_paper_portfolio.json` | weather | Estado del portfolio paper del weather bot |
+| `data/crypto_paper_portfolio.json` | crypto | Estado del portfolio paper del crypto bot |
+| `data/logs/weather_operations.jsonl` | weather | Log append-only de operaciones del weather bot |
+| `data/logs/crypto_operations.jsonl` | crypto | Log append-only de operaciones del crypto bot |
+| `data/logs/weather_balance_summary.json` | weather | Snapshot del balance del weather bot |
+| `data/logs/crypto_balance_summary.json` | crypto | Snapshot del balance del crypto bot |
+| `data/logs/bot.log` | ambos | Log completo del proceso (rotación 10MB) |
 
 ---
 
@@ -110,21 +116,51 @@ core/models.py             ← Todos los tipos de datos compartidos
 # Instalar en modo editable
 pip install -e ".[dev]"
 
+# ── Weather bot ──────────────────────────────────────────────────────────────
 # Correr un solo ciclo en modo paper (sin loop)
 python -m scripts.run weather --mode paper --once
 
-# Ver balance
+# Correr en loop continuo
+python -m scripts.run weather --mode paper
+
+# ── Crypto bot ───────────────────────────────────────────────────────────────
+# Correr un solo ciclo en modo paper (sin loop)
+python -m scripts.run crypto --mode paper --once
+
+# Correr en loop continuo (escanea cada 300s por defecto)
+python -m scripts.run crypto --mode paper
+
+# Correr ambos bots simultáneamente (en terminales separadas o con &)
+python -m scripts.run weather --mode paper &
+python -m scripts.run crypto --mode paper &
+
+# ── Status / balances ────────────────────────────────────────────────────────
+# Ver ambos bots
 python -m scripts.run status
 
-# Ver últimas 30 operaciones
+# Ver solo un bot
+python -m scripts.run status --bot weather
+python -m scripts.run status --bot crypto
+
+# ── Operaciones ──────────────────────────────────────────────────────────────
+# Ver últimas 30 operaciones (weather por defecto)
 python -m scripts.run operations --tail 30
 
 # Ver solo trades
 python -m scripts.run operations --filter trade
 
-# Resetear portfolio paper
-rm data/paper_portfolio.json
+# ── Reset paper ──────────────────────────────────────────────────────────────
+# Resetear ambos bots
+python -m scripts.run paper-reset -y
 
+# Resetear solo un bot
+python -m scripts.run paper-reset --bot weather -y
+python -m scripts.run paper-reset --bot crypto -y
+
+# Resetear incluyendo logs
+python -m scripts.run paper-reset --bot crypto -y --with-logs
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
 # Ver logs en tiempo real
 tail -f data/logs/bot.log
 ```

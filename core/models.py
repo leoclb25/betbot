@@ -54,6 +54,11 @@ class SignalAction(str, Enum):
     SKIP = "SKIP"  # not enough edge / risk limit hit
 
 
+class CryptoPriceDirection(str, Enum):
+    ABOVE = "above"
+    BELOW = "below"
+
+
 # ─── Market ──────────────────────────────────────────────────────────────────
 
 class Market(BaseModel):
@@ -78,6 +83,27 @@ class Market(BaseModel):
             end = end.astimezone(timezone.utc)
         delta = end - datetime.now(timezone.utc)
         return max(0.0, delta.total_seconds() / 86400)
+
+
+# ─── Crypto parsing ──────────────────────────────────────────────────────────
+
+class CryptoMarketInfo(BaseModel):
+    condition_id: str
+    question: str
+    asset: str                       # "BTC" or "ETH"
+    direction: CryptoPriceDirection
+    threshold_usd: float
+    target_datetime: datetime
+    minutes_to_resolution: float
+
+
+class CryptoPriceForecast(BaseModel):
+    asset: str
+    current_price_usd: float
+    price_change_pct_24h: float
+    volatility_per_min: float
+    bid_ask_imbalance: float
+    fetched_at: datetime
 
 
 # ─── Weather parsing ─────────────────────────────────────────────────────────

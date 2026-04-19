@@ -1,0 +1,49 @@
+# =============================================================================
+# betbot-crypto.service — Servicio systemd para BetBot Crypto
+#
+# setup_ec2.sh reemplaza __INSTALL_DIR__ y __SERVICE_USER__ automáticamente.
+# Para instalación manual:
+#   sudo cp deploy/betbot-crypto.service /etc/systemd/system/
+#   sudo sed -i "s|__INSTALL_DIR__|$(pwd)|g; s|__SERVICE_USER__|$(whoami)|g" \
+#        /etc/systemd/system/betbot-crypto.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now betbot-crypto
+# =============================================================================
+
+[Unit]
+Description=BetBot – Crypto Price Prediction Market Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__INSTALL_DIR__
+
+# Lee el .env automáticamente
+EnvironmentFile=-__INSTALL_DIR__/.env
+
+# Comando principal — el modo lo controla BOT_MODE en el .env (paper o live)
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m scripts.run crypto --mode ${BOT_MODE:-paper}
+
+# Reinicio automático si el proceso muere (ej. error de red)
+Restart=on-failure
+RestartSec=30s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Seguridad básica
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=__INSTALL_DIR__
+
+# Logs van a journald → ver con: journalctl -u betbot-crypto -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=betbot-crypto
+
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
