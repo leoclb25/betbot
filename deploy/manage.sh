@@ -194,6 +194,21 @@ case "$CMD" in
         done
         ;;
 
+    install)
+        log "Instalando servicios systemd..."
+        for BOT_NAME in weather crypto; do
+            SRC="$INSTALL_DIR/deploy/betbot-${BOT_NAME}.service"
+            DEST="/etc/systemd/system/betbot-${BOT_NAME}.service"
+            [[ -f "$SRC" ]] || err "No se encontró $SRC"
+            sudo cp "$SRC" "$DEST"
+            sudo sed -i "s|__INSTALL_DIR__|$INSTALL_DIR|g" "$DEST"
+            sudo sed -i "s|__SERVICE_USER__|$(whoami)|g" "$DEST"
+            log "Instalado: $DEST"
+        done
+        sudo systemctl daemon-reload
+        log "daemon-reload OK. Ahora podés correr: ./deploy/manage.sh start"
+        ;;
+
     enable)
         for SVC in $(_services "$BOT"); do
             sudo systemctl enable "$SVC"
@@ -222,7 +237,8 @@ case "$CMD" in
         echo -e "  ${GREEN}stop${NC}   [bot]          Detener bot(s)"
         echo -e "  ${GREEN}restart${NC} [bot]         Reiniciar (ej. después de cambiar .env)"
         echo -e "  ${GREEN}status${NC} [bot]          Estado del servicio + últimas líneas de log"
-        echo -e "  ${GREEN}enable${NC} [bot]          Arrancar automáticamente al iniciar el servidor"
+        echo -e "  ${GREEN}install${NC}               Copiar .service a systemd + daemon-reload (correr una vez)
+  ${GREEN}enable${NC} [bot]          Arrancar automáticamente al iniciar el servidor"
         echo -e "  ${GREEN}disable${NC} [bot]         Quitar el arranque automático"
         echo ""
         echo -e "${BOLD}  LOGS${NC}"
