@@ -132,6 +132,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
+from core.datetime_display import format_utc_datetime_short
+
 console = Console()
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -360,8 +362,8 @@ def _show_bot_status(bot_name: str) -> None:
             )
             pos_table.add_column("#",          width=3)
             pos_table.add_column("Side",       width=5)
-            pos_table.add_column("Abierta",    width=16)
-            pos_table.add_column("Cierra",     width=11)
+            pos_table.add_column("Abierta (UTC)", width=22)
+            pos_table.add_column("Fin (UTC)",  width=22)
             pos_table.add_column("Entrada $",  justify="right", width=10)
             pos_table.add_column("Shares",     justify="right", width=10)
             pos_table.add_column("P. entrada", justify="right", width=10)
@@ -398,10 +400,8 @@ def _show_bot_status(bot_name: str) -> None:
                 pnl_color = "green" if pnl >= 0 else "red"
                 pnl_sign  = "+" if pnl >= 0 else ""
 
-                opened_raw = p.get("opened_at", "")
-                opened_str = opened_raw[:16].replace("T", " ") if opened_raw else "?"
-                end_raw    = p.get("market_end_date", "")
-                end_str    = end_raw[:10] if end_raw else "?"
+                opened_str = format_utc_datetime_short(p.get("opened_at"))
+                end_str = format_utc_datetime_short(p.get("market_end_date"))
 
                 pos_table.add_row(
                     str(i), side, opened_str, end_str,
@@ -413,6 +413,10 @@ def _show_bot_status(bot_name: str) -> None:
                 )
 
             console.print(pos_table)
+            console.print(
+                "[dim]Abierta / Fin = hora UTC del bot y de la API. "
+                "La pregunta del mercado suele mostrar ventanas en hora ET (Polymarket).[/dim]"
+            )
             sign = "+" if total_live_pnl >= 0 else ""
             color = "green" if total_live_pnl >= 0 else "red"
             console.print(

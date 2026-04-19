@@ -139,7 +139,19 @@ class CryptoBot(BaseBot):
 
             minutes_left = market.days_to_resolution * 1440
 
-            if market.closed or minutes_left <= 0:
+            # Use parser to verify resolution time independently of Gamma API lag
+            parsed = self._strategy._parser.parse(
+                market.condition_id, market.question,
+                reference_datetime=datetime.now(timezone.utc),
+            )
+            parser_minutes = parsed.minutes_to_resolution if parsed else None
+
+            expired = (
+                market.closed
+                or minutes_left <= 0
+                or (parser_minutes is not None and parser_minutes < -1)
+            )
+            if expired:
                 self._close_position(position, market, "market resolved")
                 continue
 
@@ -160,6 +172,14 @@ class CryptoBot(BaseBot):
             self._try_forced_bet()
 
     def _try_forced_bet(self) -> None:
+        state = self.tracker.get_state()
+        if state.open_position_count >= self.risk.params.max_open_positions:
+            logger.debug(
+                f"[CRYPTO] forced-bet: skipped — already at max positions "
+                f"({state.open_position_count}/{self.risk.params.max_open_positions})"
+            )
+            return
+
         floor = env_float("CRYPTO_FORCE_BET_FLOOR", -0.02)
         min_minutes = env_float("CRYPTO_FORCE_BET_MIN_MINUTES", 3.0)
         min_pos_usd = self.risk.params.min_position_usd
@@ -169,7 +189,6 @@ class CryptoBot(BaseBot):
             logger.debug("[CRYPTO] forced-bet: no markets available")
             return
 
-        state = self.tracker.get_state()
         best_signal = None
         best_market = None
 

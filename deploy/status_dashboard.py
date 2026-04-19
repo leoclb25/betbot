@@ -21,6 +21,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from core.datetime_display import format_utc_datetime_short
+
 FEE = 0.02
 GAMMA_MARKETS = "https://gamma-api.polymarket.com/markets"
 
@@ -108,7 +110,7 @@ def _summary_section(bot_name: str, repo: Path) -> str:
         if open_pos:
             head = (
                 "<thead><tr>"
-                "<th>#</th><th>Side</th><th>Abierta</th><th>Cierra</th>"
+                "<th>#</th><th>Side</th><th>Abierta (UTC)</th><th>Fin (UTC)</th>"
                 "<th>Entrada $</th><th>Shares</th><th>P. entrada</th><th>P. actual</th>"
                 "<th>P&amp;L</th><th>Edge</th><th>Pregunta</th>"
                 "</tr></thead>"
@@ -139,10 +141,8 @@ def _summary_section(bot_name: str, repo: Path) -> str:
                 pnl_c = "pos" if pnl_pos >= 0 else "neg"
                 ps = "+" if pnl_pos >= 0 else ""
 
-                opened_raw = str(p.get("opened_at", ""))
-                opened_str = opened_raw[:16].replace("T", " ") if opened_raw else "?"
-                end_raw = str(p.get("market_end_date", ""))
-                end_str = end_raw[:10] if end_raw else "?"
+                opened_str = format_utc_datetime_short(p.get("opened_at"))
+                end_str = format_utc_datetime_short(p.get("market_end_date"))
 
                 q = html.escape(str(p.get("question", ""))[:200])
                 body_rows.append(
@@ -165,6 +165,9 @@ def _summary_section(bot_name: str, repo: Path) -> str:
             tc = "pos" if total_live_pnl >= 0 else "neg"
             positions_html = (
                 f'<h3>Posiciones abiertas ({len(open_pos)})</h3>'
+                '<p class="hint">Abierta y fin están en <strong>UTC</strong> (bot y API). '
+                "La columna Pregunta suele usar <strong>hora ET</strong> de Polymarket; "
+                "compará con un conversor de zona si necesitás cruzarlas.</p>"
                 f'<div class="table-wrap"><table class="positions">{head}<tbody>'
                 + "".join(body_rows)
                 + "</tbody></table></div>"
@@ -250,6 +253,7 @@ def build_html(repo: Path) -> str:
     .neg {{ color: var(--neg); font-weight: 600; }}
     .warn {{ color: var(--warn); }}
     .footer-pnl {{ margin-top: 0.75rem; font-size: 0.9rem; }}
+    .hint {{ color: var(--muted); font-size: 0.8rem; margin: 0 0 0.6rem; max-width: 52rem; }}
   </style>
 </head>
 <body>
