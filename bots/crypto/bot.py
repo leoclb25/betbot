@@ -110,7 +110,11 @@ class CryptoBot(BaseBot):
 
     def evaluate_market(self, market: Market) -> BotSignal:
         state = self.tracker.get_state()
-        return self._strategy.evaluate_market(market, state)
+        logger.debug(f"[CRYPTO] EVAL '{market.question[:80]}' | yes={market.yes_price:.3f} liq=${market.liquidity_usd:.0f} days={market.days_to_resolution:.4f}")
+        signal = self._strategy.evaluate_market(market, state)
+        if signal.action.value == "SKIP":
+            logger.debug(f"[CRYPTO] SKIP → {signal.reason}")
+        return signal
 
     def manage_open_positions(self) -> None:
         positions = self.client.get_positions()
