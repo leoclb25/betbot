@@ -94,10 +94,14 @@ class CryptoBot(BaseBot):
             if p.status.value == "OPEN"
         }
 
+        min_price = self.risk.params.min_market_price
+        max_price = self.risk.params.max_market_price
+
         filtered = [
             m for m in all_markets
             if 0 < m.days_to_resolution * 1440 <= max_min
             and m.liquidity_usd >= min_liq
+            and min_price <= m.yes_price <= max_price
             and m.condition_id not in self._open_condition_ids
             and m.question.strip().lower() not in open_questions
         ]
