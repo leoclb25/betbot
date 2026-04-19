@@ -474,6 +474,17 @@ chmod +x deploy/manage.sh
 ./deploy/manage.sh scan-once paper
 ```
 
+#### Panel web del balance (mismo dato que `balance`)
+
+Servidor HTTP mínimo (`deploy/status_dashboard.py`) que muestra en el navegador lo mismo que `./deploy/manage.sh balance` (resúmenes JSON + posiciones con precios vía Gamma). Por defecto el servicio escucha en **127.0.0.1:8765**; para verlo desde fuera conviene **nginx** como proxy en el puerto 80 (ejemplo en `deploy/nginx-status-web.conf.example`). Restringí el acceso (security group, `auth_basic` en nginx, o VPN).
+
+```bash
+./deploy/manage.sh dashboard-install
+./deploy/manage.sh dashboard-start
+# Opcional: arranque al boot
+sudo systemctl enable betbot-status-web
+```
+
 ### Comandos systemd directos
 
 ```bash

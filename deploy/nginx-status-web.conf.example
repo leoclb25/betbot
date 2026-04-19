@@ -1,0 +1,31 @@
+# Ejemplo para nginx en Ubuntu (copiar a /etc/nginx/sites-available/ y enlazar en sites-enabled).
+#
+#   sudo apt install nginx
+#   sudo cp deploy/nginx-status-web.conf.example /etc/nginx/sites-available/betbot-status
+#   sudo sed -i "s|__SERVER_NAME__|tu-dominio-o-ip|" /etc/nginx/sites-available/betbot-status
+#   sudo ln -sf /etc/nginx/sites-available/betbot-status /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# El panel Python debe estar en marcha: ./deploy/manage.sh dashboard-start
+#
+# Opcional — basic auth:
+#   sudo apt install apache2-utils
+#   sudo htpasswd -c /etc/nginx/.htpasswd-betbot tu_usuario
+#   Descomentá las dos líneas "auth_basic" abajo.
+
+server {
+    listen 80;
+    server_name __SERVER_NAME__;
+
+    location / {
+        # auth_basic           "BetBot";
+        # auth_basic_user_file /etc/nginx/.htpasswd-betbot;
+
+        proxy_pass         http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}

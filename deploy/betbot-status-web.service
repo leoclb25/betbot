@@ -1,0 +1,39 @@
+# =============================================================================
+# betbot-status-web — Panel HTTP con balance (mismo dato que manage.sh balance)
+#
+# Instalación:
+#   ./deploy/manage.sh dashboard-install
+#   ./deploy/manage.sh dashboard-start
+#
+# Por defecto escucha en 127.0.0.1:8765 (solo local). Para exponer por IP sin
+# nginx, editá ExecStart y usá --host 0.0.0.0 y abrí el puerto en el security group.
+# Con nginx: ver deploy/nginx-status-web.conf.example
+# =============================================================================
+
+[Unit]
+Description=BetBot — panel web de balance (status)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__INSTALL_DIR__
+
+EnvironmentFile=-__INSTALL_DIR__/.env
+
+ExecStart=__INSTALL_DIR__/.venv/bin/python __INSTALL_DIR__/deploy/status_dashboard.py --host 127.0.0.1 --port 8765
+
+Restart=on-failure
+RestartSec=10s
+
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=__INSTALL_DIR__
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=betbot-status-web
+
+[Install]
+WantedBy=multi-user.target

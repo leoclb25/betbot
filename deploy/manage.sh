@@ -22,6 +22,10 @@
 #   ./deploy/manage.sh update             ← git pull + reinstalar + reiniciar
 #   ./deploy/manage.sh reset-paper        ← borrar portfolios paper (ambos)
 #   ./deploy/manage.sh reset-paper crypto ← solo crypto
+#
+#   ./deploy/manage.sh dashboard-install  ← instala panel web de balance (systemd)
+#   ./deploy/manage.sh dashboard-start    ← http://127.0.0.1:8765 (detrás de nginx en prod)
+#   ./deploy/manage.sh dashboard-stop
 # =============================================================================
 
 set -euo pipefail
@@ -209,6 +213,46 @@ case "$CMD" in
         log "daemon-reload OK. Ahora podés correr: ./deploy/manage.sh start"
         ;;
 
+    dashboard-install)
+        SRC="$INSTALL_DIR/deploy/betbot-status-web.service"
+        DEST="/etc/systemd/system/betbot-status-web.service"
+        [[ -f "$SRC" ]] || err "No se encontró $SRC"
+        sudo cp "$SRC" "$DEST"
+        sudo sed -i "s|__INSTALL_DIR__|$INSTALL_DIR|g" "$DEST"
+        sudo sed -i "s|__SERVICE_USER__|$(whoami)|g" "$DEST"
+        log "Instalado: $DEST"
+        sudo systemctl daemon-reload
+        log "daemon-reload OK. Iniciá con: ./deploy/manage.sh dashboard-start"
+        log "Opcional: nginx → ver deploy/nginx-status-web.conf.example"
+        ;;
+
+    dashboard-start)
+        log "Iniciando betbot-status-web..."
+        sudo systemctl start betbot-status-web
+        sleep 1
+        sudo systemctl status betbot-status-web --no-pager -l
+        ;;
+
+    dashboard-stop)
+        warn "Deteniendo betbot-status-web..."
+        sudo systemctl stop betbot-status-web
+        log "Listo."
+        ;;
+
+    dashboard-restart)
+        warn "Reiniciando betbot-status-web..."
+        sudo systemctl restart betbot-status-web
+        sleep 1
+        sudo systemctl status betbot-status-web --no-pager -l
+        ;;
+
+    dashboard-status)
+        sudo systemctl status betbot-status-web --no-pager -l
+        echo ""
+        log "Últimas 15 líneas:"
+        sudo journalctl -u betbot-status-web -n 15 --no-pager
+        ;;
+
     enable)
         for SVC in $(_services "$BOT"); do
             sudo systemctl enable "$SVC"
@@ -249,6 +293,13 @@ case "$CMD" in
         echo -e "  ${GREEN}balance${NC} [bot]         Balance actual + posiciones abiertas"
         echo -e "  ${GREEN}operations${NC} [N]        Últimas N operaciones (default: 30)"
         echo ""
+        echo -e "${BOLD}  PANEL WEB (balance)${NC}"
+        echo -e "  ${GREEN}dashboard-install${NC}     Instalar servicio systemd del panel HTTP"
+        echo -e "  ${GREEN}dashboard-start${NC}       Iniciar panel (puerto 8765, ver .service)"
+        echo -e "  ${GREEN}dashboard-stop${NC}        Detener panel"
+        echo -e "  ${GREEN}dashboard-restart${NC}     Reiniciar panel"
+        echo -e "  ${GREEN}dashboard-status${NC}      Estado + últimas líneas de journald"
+        echo ""
         echo -e "${BOLD}  DESARROLLO / MANTENIMIENTO${NC}"
         echo -e "  ${GREEN}update${NC} [bot]          git pull + reinstalar deps + reiniciar"
         echo -e "  ${GREEN}scan-once${NC} [bot] [mode] Un ciclo manual en modo paper/live"
@@ -262,6 +313,8 @@ case "$CMD" in
         echo -e "  ${YELLOW}./deploy/manage.sh balance${NC}              # balance de ambos"
         echo -e "  ${YELLOW}./deploy/manage.sh reset-paper crypto${NC}   # resetea solo crypto"
         echo -e "  ${YELLOW}./deploy/manage.sh scan-once crypto paper${NC} # ciclo manual crypto"
+        echo -e "  ${YELLOW}./deploy/manage.sh dashboard-install && ./deploy/manage.sh dashboard-start${NC}"
+        echo -e "    ${YELLOW}# luego nginx: deploy/nginx-status-web.conf.example${NC}"
         echo ""
         ;;
 
