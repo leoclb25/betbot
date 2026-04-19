@@ -58,7 +58,8 @@ class CryptoStrategy:
         # For UP/DOWN markets: YES=up, NO=down. true_prob = P(up), so compare against yes_price.
         # For price-level markets: same logic — true_prob = P(above/below), side determined by edge.
         market_price = market.yes_price
-        edge, side = self._risk.calculate_edge(true_prob, market_price, is_hold_strategy=False)
+        # Hold to resolution = only 1 fee (entry). No exit fee on binary resolution.
+        edge, side = self._risk.calculate_edge(true_prob, market_price, is_hold_strategy=True)
 
         if edge < self._risk.params.min_edge:
             return _skip(
