@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 # =============================================================================
-# manage.sh — Gestión del bot en EC2
+# manage.sh — Gestión de BetBot en EC2
 #
 # Uso desde la raíz del repo:
-#   ./deploy/manage.sh start
-#   ./deploy/manage.sh stop
-#   ./deploy/manage.sh restart
-#   ./deploy/manage.sh update       ← git pull + reinstalar + reiniciar
-#   ./deploy/manage.sh logs         ← ver logs en tiempo real
-#   ./deploy/manage.sh status
-#   ./deploy/manage.sh balance
-#   ./deploy/manage.sh operations
-#   ./deploy/manage.sh scan-once    ← un ciclo manual para probar
+#   ./deploy/manage.sh start              ← inicia ambos bots
+#   ./deploy/manage.sh start weather      ← solo weather
+#   ./deploy/manage.sh start crypto       ← solo crypto
+#   ./deploy/manage.sh stop               ← detiene ambos
+#   ./deploy/manage.sh stop crypto        ← solo crypto
+#   ./deploy/manage.sh restart            ← reinicia ambos
+#   ./deploy/manage.sh status             ← estado de ambos
+#   ./deploy/manage.sh logs               ← logs de ambos en tiempo real
+#   ./deploy/manage.sh logs weather       ← logs solo weather
+#   ./deploy/manage.sh logs crypto        ← logs solo crypto
+#   ./deploy/manage.sh balance            ← balance de ambos portfolios
+#   ./deploy/manage.sh balance weather    ← solo weather
+#   ./deploy/manage.sh balance crypto     ← solo crypto
+#   ./deploy/manage.sh operations         ← últimas 30 operaciones (ambos)
+#   ./deploy/manage.sh scan-once          ← ciclo manual (ambos)
+#   ./deploy/manage.sh scan-once crypto   ← ciclo manual crypto
+#   ./deploy/manage.sh update             ← git pull + reinstalar + reiniciar
+#   ./deploy/manage.sh reset-paper        ← borrar portfolios paper (ambos)
+#   ./deploy/manage.sh reset-paper crypto ← solo crypto
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SERVICE="betbot-weather"
 PYTHON="$INSTALL_DIR/.venv/bin/python"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
@@ -29,50 +38,87 @@ err()  { echo -e "${RED}✗${NC} $*"; exit 1; }
 [[ -f "$PYTHON" ]] || err "Venv no encontrado en $INSTALL_DIR/.venv — corre setup_ec2.sh primero"
 
 CMD="${1:-help}"
+BOT="${2:-all}"   # weather | crypto | all
+
+# Resuelve la lista de servicios a operar
+_services() {
+    case "$1" in
+        weather) echo "betbot-weather" ;;
+        crypto)  echo "betbot-crypto"  ;;
+        all)     echo "betbot-weather betbot-crypto" ;;
+        *)       err "Bot desconocido: '$1'. Usa: weather | crypto | all" ;;
+    esac
+}
 
 case "$CMD" in
 
     start)
-        log "Iniciando $SERVICE..."
-        sudo systemctl start "$SERVICE"
+        for SVC in $(_services "$BOT"); do
+            log "Iniciando $SVC..."
+            sudo systemctl start "$SVC"
+        done
         sleep 1
-        sudo systemctl status "$SERVICE" --no-pager -l
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl status "$SVC" --no-pager -l
+        done
         ;;
 
     stop)
-        warn "Deteniendo $SERVICE..."
-        sudo systemctl stop "$SERVICE"
-        log "Bot detenido."
+        for SVC in $(_services "$BOT"); do
+            warn "Deteniendo $SVC..."
+            sudo systemctl stop "$SVC"
+        done
+        log "Listo."
         ;;
 
     restart)
-        warn "Reiniciando $SERVICE..."
-        sudo systemctl restart "$SERVICE"
+        for SVC in $(_services "$BOT"); do
+            warn "Reiniciando $SVC..."
+            sudo systemctl restart "$SVC"
+        done
         sleep 1
-        sudo systemctl status "$SERVICE" --no-pager -l
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl status "$SVC" --no-pager -l
+        done
         ;;
 
     status)
-        sudo systemctl status "$SERVICE" --no-pager -l
-        echo ""
-        log "Últimas 15 líneas de log:"
-        sudo journalctl -u "$SERVICE" -n 15 --no-pager
+        for SVC in $(_services "$BOT"); do
+            echo ""
+            sudo systemctl status "$SVC" --no-pager -l
+            echo ""
+            log "Últimas 10 líneas de $SVC:"
+            sudo journalctl -u "$SVC" -n 10 --no-pager
+        done
         ;;
 
     logs)
-        log "Logs en tiempo real — Ctrl+C para salir"
-        sudo journalctl -u "$SERVICE" -f
+        if [[ "$BOT" == "all" ]]; then
+            log "Logs en tiempo real (weather + crypto) — Ctrl+C para salir"
+            sudo journalctl -u betbot-weather -u betbot-crypto -f
+        else
+            SVC="betbot-$BOT"
+            log "Logs en tiempo real ($SVC) — Ctrl+C para salir"
+            sudo journalctl -u "$SVC" -f
+        fi
         ;;
 
     logs-n)
         N="${2:-50}"
-        sudo journalctl -u "$SERVICE" -n "$N" --no-pager
+        BOT_ARG="${3:-all}"
+        for SVC in $(_services "$BOT_ARG"); do
+            sudo journalctl -u "$SVC" -n "$N" --no-pager
+        done
         ;;
 
     balance)
         log "Balance del portfolio:"
         cd "$INSTALL_DIR"
-        "$PYTHON" -m scripts.run status
+        case "$BOT" in
+            all)     "$PYTHON" -m scripts.run status ;;
+            weather) "$PYTHON" -m scripts.run status --bot weather ;;
+            crypto)  "$PYTHON" -m scripts.run status --bot crypto ;;
+        esac
         ;;
 
     operations)
@@ -83,29 +129,32 @@ case "$CMD" in
         ;;
 
     scan-once)
-        # Corre un ciclo manual. Detiene el servicio si está corriendo.
-        MODE="${2:-paper}"
-        RUNNING=false
-        if sudo systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
-            RUNNING=true
-            warn "Deteniendo servicio para correr ciclo manual..."
-            sudo systemctl stop "$SERVICE"
-        fi
+        MODE="${3:-paper}"
+        for SVC in $(_services "$BOT"); do
+            RUNNING=false
+            if sudo systemctl is-active --quiet "$SVC" 2>/dev/null; then
+                RUNNING=true
+                warn "Deteniendo $SVC para ciclo manual..."
+                sudo systemctl stop "$SVC"
+            fi
 
-        log "Corriendo un ciclo en modo $MODE (con verbose)..."
-        cd "$INSTALL_DIR"
-        "$PYTHON" -m scripts.run --verbose weather --mode "$MODE" --once
+            BOT_NAME="${SVC#betbot-}"
+            log "Corriendo un ciclo $BOT_NAME en modo $MODE..."
+            cd "$INSTALL_DIR"
+            "$PYTHON" -m scripts.run --verbose "$BOT_NAME" --mode "$MODE" --once
 
-        if $RUNNING; then
-            log "Reiniciando servicio..."
-            sudo systemctl start "$SERVICE"
-        fi
+            if $RUNNING; then
+                log "Reiniciando $SVC..."
+                sudo systemctl start "$SVC"
+            fi
+        done
         ;;
 
     update)
-        # git pull (como el usuario actual) + reinstalar deps + reiniciar
-        log "Deteniendo servicio..."
-        sudo systemctl stop "$SERVICE" 2>/dev/null || true
+        log "Deteniendo bots..."
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl stop "$SVC" 2>/dev/null || true
+        done
 
         log "Actualizando código..."
         cd "$INSTALL_DIR"
@@ -114,68 +163,89 @@ case "$CMD" in
         log "Reinstalando dependencias..."
         "$INSTALL_DIR/.venv/bin/pip" install -e . -q
 
-        log "Iniciando servicio..."
-        sudo systemctl start "$SERVICE"
+        log "Iniciando bots..."
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl start "$SVC"
+        done
         sleep 1
-        sudo systemctl status "$SERVICE" --no-pager -l
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl status "$SVC" --no-pager -l
+        done
         log "Actualización completa."
         ;;
 
     reset-paper)
-        # Resetear portfolio paper (empieza de cero)
-        warn "Reseteando portfolio paper y logs..."
-        RUNNING=false
-        if sudo systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
-            RUNNING=true
-            sudo systemctl stop "$SERVICE"
-        fi
+        warn "Reseteando portfolio paper..."
+        for SVC in $(_services "$BOT"); do
+            if sudo systemctl is-active --quiet "$SVC" 2>/dev/null; then
+                sudo systemctl stop "$SVC"
+            fi
+        done
+
         cd "$INSTALL_DIR"
-        "$PYTHON" -m scripts.run paper-reset -y --with-logs --bot-log
-        if $RUNNING; then
-            sudo systemctl start "$SERVICE"
-        fi
+        case "$BOT" in
+            all)     "$PYTHON" -m scripts.run paper-reset -y --with-logs ;;
+            weather) "$PYTHON" -m scripts.run paper-reset --bot weather -y --with-logs ;;
+            crypto)  "$PYTHON" -m scripts.run paper-reset --bot crypto  -y --with-logs ;;
+        esac
+
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl start "$SVC" 2>/dev/null || true
+        done
         ;;
 
     enable)
-        sudo systemctl enable "$SERVICE"
-        log "Arranque automático habilitado."
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl enable "$SVC"
+            log "Arranque automático habilitado: $SVC"
+        done
         ;;
 
     disable)
-        sudo systemctl disable "$SERVICE"
-        warn "Arranque automático deshabilitado."
+        for SVC in $(_services "$BOT"); do
+            sudo systemctl disable "$SVC"
+            warn "Arranque automático deshabilitado: $SVC"
+        done
         ;;
 
     help)
         echo ""
-        echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${BOLD}║               BetBot — Comandos disponibles                 ║${NC}"
-        echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+        echo -e "${BOLD}╔══════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}║                 BetBot — Comandos disponibles                   ║${NC}"
+        echo -e "${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  Uso: ${BOLD}./deploy/manage.sh <comando> [weather|crypto|all]${NC}"
+        echo -e "  El segundo argumento es el bot a operar. Default: ${BOLD}all${NC}"
         echo ""
         echo -e "${BOLD}  SERVICIO${NC}"
-        echo -e "  ${GREEN}start${NC}                  Iniciar el bot en segundo plano"
-        echo -e "  ${GREEN}stop${NC}                   Detener el bot"
-        echo -e "  ${GREEN}restart${NC}                Reiniciar (ej. después de cambiar .env)"
-        echo -e "  ${GREEN}status${NC}                 Estado del servicio + últimas líneas de log"
-        echo -e "  ${GREEN}enable${NC}                 Arrancar automáticamente al iniciar el servidor"
-        echo -e "  ${GREEN}disable${NC}                Quitar el arranque automático"
+        echo -e "  ${GREEN}start${NC}  [bot]          Iniciar bot(s) en segundo plano"
+        echo -e "  ${GREEN}stop${NC}   [bot]          Detener bot(s)"
+        echo -e "  ${GREEN}restart${NC} [bot]         Reiniciar (ej. después de cambiar .env)"
+        echo -e "  ${GREEN}status${NC} [bot]          Estado del servicio + últimas líneas de log"
+        echo -e "  ${GREEN}enable${NC} [bot]          Arrancar automáticamente al iniciar el servidor"
+        echo -e "  ${GREEN}disable${NC} [bot]         Quitar el arranque automático"
         echo ""
         echo -e "${BOLD}  LOGS${NC}"
-        echo -e "  ${GREEN}logs${NC}                   Ver logs en tiempo real  (Ctrl+C para salir)"
-        echo -e "  ${GREEN}logs-n 100${NC}             Ver últimas 100 líneas"
+        echo -e "  ${GREEN}logs${NC}   [bot]          Ver logs en tiempo real  (Ctrl+C para salir)"
+        echo -e "  ${GREEN}logs-n${NC} <N> [bot]      Ver últimas N líneas"
         echo ""
         echo -e "${BOLD}  PORTFOLIO${NC}"
-        echo -e "  ${GREEN}balance${NC}                Balance actual + posiciones abiertas"
-        echo -e "  ${GREEN}operations${NC}             Últimas 30 operaciones"
-        echo -e "  ${GREEN}operations 50${NC}          Últimas 50 operaciones"
+        echo -e "  ${GREEN}balance${NC} [bot]         Balance actual + posiciones abiertas"
+        echo -e "  ${GREEN}operations${NC} [N]        Últimas N operaciones (default: 30)"
         echo ""
         echo -e "${BOLD}  DESARROLLO / MANTENIMIENTO${NC}"
-        echo -e "  ${GREEN}update${NC}                 git pull + reinstalar deps + reiniciar"
-        echo -e "  ${GREEN}scan-once${NC}              Un ciclo manual en modo paper (para probar)"
-        echo -e "  ${GREEN}scan-once live${NC}         Un ciclo manual en modo live"
-        echo -e "  ${GREEN}reset-paper${NC}            Borrar portfolio paper y todos los logs (cero)"
+        echo -e "  ${GREEN}update${NC} [bot]          git pull + reinstalar deps + reiniciar"
+        echo -e "  ${GREEN}scan-once${NC} [bot] [mode] Un ciclo manual en modo paper/live"
+        echo -e "  ${GREEN}reset-paper${NC} [bot]     Borrar portfolio paper y logs (empieza de cero)"
         echo ""
-        echo -e "  Uso: ${BOLD}./deploy/manage.sh <comando>${NC}"
+        echo -e "${BOLD}  Ejemplos:${NC}"
+        echo -e "  ${YELLOW}./deploy/manage.sh start${NC}                # inicia weather + crypto"
+        echo -e "  ${YELLOW}./deploy/manage.sh start crypto${NC}         # solo crypto"
+        echo -e "  ${YELLOW}./deploy/manage.sh stop weather${NC}         # detiene solo weather"
+        echo -e "  ${YELLOW}./deploy/manage.sh logs crypto${NC}          # logs del crypto bot"
+        echo -e "  ${YELLOW}./deploy/manage.sh balance${NC}              # balance de ambos"
+        echo -e "  ${YELLOW}./deploy/manage.sh reset-paper crypto${NC}   # resetea solo crypto"
+        echo -e "  ${YELLOW}./deploy/manage.sh scan-once crypto paper${NC} # ciclo manual crypto"
         echo ""
         ;;
 
