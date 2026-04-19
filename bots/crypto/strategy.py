@@ -124,52 +124,50 @@ class CryptoStrategy:
     def _prob_up_or_down(self, info: CryptoMarketInfo, T: float) -> Optional[float]:
         """
         Signal-based model for directional (Up/Down) markets.
-        Lognormal adds nothing when K=spot. Pure short-term signals instead.
+
+        Key insight: order book imbalance and trade flow are highly predictive
+        at short horizons (T < 10min) but decay quickly at longer ones.
+        time_factor scales signal strength by proximity to resolution.
         """
         spot = self._price.get_spot_price(info.asset)
         if spot <= 0:
             return None
 
-        # Short-term momentum: last 3 minutes of 1m candles
-        mom_3m = self._price.get_short_momentum(info.asset, minutes=3)
-        # Order book imbalance
-        imbalance = self._price.get_order_book_imbalance(info.asset)
-        # Trade flow: last 30 trades (buy vs sell volume)
+        mom_3m     = self._price.get_short_momentum(info.asset, minutes=3)
+        imbalance  = self._price.get_order_book_imbalance(info.asset)
         trade_flow = self._price.get_trade_flow(info.asset, count=30)
 
         is_up = info.direction == CryptoPriceDirection.UP
 
-        # 3-minute momentum: ±7% (scaled, caps at ±0.5% price move)
-        mom_raw = mom_3m / 100  # convert % to fraction
-        mom_adj = max(-0.07, min(0.07, mom_raw * 14))
-        if not is_up:
-            mom_adj = -mom_adj
+        # Time factor: signals are most predictive at short T.
+        # At T=5min → 1.0, at T=15min → 1.0, at T=30min → 0.5, at T=60min → 0.25
+        time_factor = min(1.0, 15.0 / max(T, 1.0))
 
-        # Order book imbalance: ±5%
-        imb_adj = max(-0.05, min(0.05, imbalance * 0.05))
-        if not is_up:
-            imb_adj = -imb_adj
+        # 3-minute momentum: up to ±7% (not time-discounted — it's already short-term)
+        mom_adj = max(-0.07, min(0.07, mom_3m / 100 * 14))
 
-        # Trade flow: ±4%
-        flow_adj = max(-0.04, min(0.04, trade_flow * 0.04))
+        # Order book imbalance: up to ±10%, scaled by time_factor
+        imb_adj = max(-0.10, min(0.10, imbalance * 0.10)) * time_factor
+
+        # Trade flow: up to ±6%, scaled by time_factor
+        flow_adj = max(-0.06, min(0.06, trade_flow * 0.15)) * time_factor
+
+        # Adjust sign for direction
         if not is_up:
+            mom_adj  = -mom_adj
+            imb_adj  = -imb_adj
             flow_adj = -flow_adj
 
-        # Signal agreement bonus: if all 3 signals agree, add 2%
-        signals = [mom_adj, imb_adj, flow_adj]
-        all_positive = all(s > 0 for s in signals)
-        all_negative = all(s < 0 for s in signals)
-        agreement_bonus = 0.02 if (all_positive or all_negative) else 0.0
+        # Agreement bonus: book and flow agree → extra 2% (time-scaled)
+        agree = 0.02 * time_factor if (imb_adj * flow_adj > 0) else 0.0
 
-        total_adj = mom_adj + imb_adj + flow_adj + agreement_bonus
+        total_adj = mom_adj + imb_adj + flow_adj + agree
         true_prob = max(0.01, min(0.99, 0.5 + total_adj))
 
         logger.debug(
-            f"[CRYPTO] {info.asset} {info.direction.value} T={T:.0f}min "
-            f"spot={spot:.2f} mom3m={mom_3m:+.3f}% "
-            f"imb={imbalance:+.3f} flow={trade_flow:+.3f} "
-            f"adjs=[{mom_adj:+.3f},{imb_adj:+.3f},{flow_adj:+.3f}] agree={agreement_bonus:.2f} "
-            f"→ p={true_prob:.3f}"
+            f"[CRYPTO] {info.asset} {info.direction.value} T={T:.0f}min tf={time_factor:.2f} "
+            f"spot={spot:.2f} mom3m={mom_3m:+.3f}% imb={imbalance:+.3f} flow={trade_flow:+.3f} "
+            f"adjs=[{mom_adj:+.3f},{imb_adj:+.3f},{flow_adj:+.3f}] agree={agree:.2f} → p={true_prob:.3f}"
         )
         return true_prob
 
