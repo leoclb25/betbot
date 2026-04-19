@@ -147,6 +147,63 @@ class CryptoBot(BaseBot):
             if should_exit:
                 self._close_position(position, market, reason)
 
+    # ── Cycle override with forced-bet fallback ───────────────────────────────
+
+    def _run_cycle(self) -> None:
+        state_before = self.tracker.get_state()
+        open_before = state_before.open_position_count
+        super()._run_cycle()
+        if self._trading_paused:
+            return
+        state_after = self.tracker.get_state()
+        if state_after.open_position_count == open_before:
+            self._try_forced_bet()
+
+    def _try_forced_bet(self) -> None:
+        floor = env_float("CRYPTO_FORCE_BET_FLOOR", -0.02)
+        min_minutes = env_float("CRYPTO_FORCE_BET_MIN_MINUTES", 3.0)
+        min_pos_usd = self.risk.params.min_position_usd
+
+        markets = self.scan_markets()
+        if not markets:
+            logger.debug("[CRYPTO] forced-bet: no markets available")
+            return
+
+        state = self.tracker.get_state()
+        best_signal = None
+        best_market = None
+
+        for market in markets:
+            minutes_left = market.days_to_resolution * 1440
+            if minutes_left < min_minutes:
+                continue
+            try:
+                signal = self._strategy.evaluate_market(market, state)
+            except Exception:
+                continue
+            if signal.edge is None or signal.side is None:
+                continue
+            if signal.edge < floor:
+                continue
+            if best_signal is None or (signal.edge or 0) > (best_signal.edge or 0):
+                best_signal = signal
+                best_market = market
+
+        if best_signal is None or best_market is None:
+            logger.debug(f"[CRYPTO] forced-bet: no candidate above floor {floor:.1%}")
+            return
+
+        logger.info(
+            f"[CRYPTO] forced-bet: entering best candidate edge={best_signal.edge:.1%} "
+            f"T={best_market.days_to_resolution*1440:.0f}min '{best_market.question[:60]}'"
+        )
+        forced = best_signal.model_copy(update={
+            "action": SignalAction.ENTER,
+            "position_size_usd": max(min_pos_usd, best_signal.position_size_usd or min_pos_usd),
+            "reason": f"[forced] {best_signal.reason}",
+        })
+        self._execute_entry(forced, market=best_market)
+
     # ── Entry / Exit execution ────────────────────────────────────────────────
 
     def _execute_entry(self, signal: BotSignal, market=None) -> None:

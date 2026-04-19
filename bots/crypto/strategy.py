@@ -61,12 +61,6 @@ class CryptoStrategy:
         # Hold to resolution = only 1 fee (entry). No exit fee on binary resolution.
         edge, side = self._risk.calculate_edge(true_prob, market_price, is_hold_strategy=True)
 
-        if edge < self._risk.params.min_edge:
-            return _skip(
-                market.condition_id, market.question,
-                f"edge {edge:.1%} < min {self._risk.params.min_edge:.1%}",
-            )
-
         price_for_sizing = market.yes_price if side == Side.YES else market.no_price
         position_usd, kelly_used = self._risk.calculate_position_size(
             portfolio_value=portfolio.total_value_usd,
@@ -75,7 +69,7 @@ class CryptoStrategy:
             open_positions_value=portfolio.open_positions_value_usd,
         )
 
-        return BotSignal(
+        signal = BotSignal(
             action=SignalAction.ENTER,
             condition_id=market.condition_id,
             question=market.question,
@@ -85,8 +79,14 @@ class CryptoStrategy:
             edge=edge,
             kelly_fraction=kelly_used,
             position_size_usd=position_usd,
-            reason=f"lognormal p={true_prob:.2%} edge={edge:.2%} T={info.minutes_to_resolution:.0f}min",
+            reason=f"p={true_prob:.2%} edge={edge:.2%} T={info.minutes_to_resolution:.0f}min",
         )
+        if edge < self._risk.params.min_edge:
+            return signal.model_copy(update={
+                "action": SignalAction.SKIP,
+                "reason": f"edge {edge:.1%} < min {self._risk.params.min_edge:.1%}",
+            })
+        return signal
 
     def evaluate_exit(
         self,
