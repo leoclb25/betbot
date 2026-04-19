@@ -485,6 +485,8 @@ Servidor HTTP mínimo (`deploy/status_dashboard.py`) que muestra en el navegador
 sudo systemctl enable betbot-status-web
 ```
 
+Si al abrir `http://TU_IP/` ves **“Welcome to nginx!”**, el sitio por defecto sigue activo. Copiá el ejemplo del repo a `sites-available`, **eliminá** `sites-enabled/default`, enlazá `betbot-status` y recargá nginx (los pasos exactos están comentados al inicio de `deploy/nginx-status-web.conf.example`). Si ves **502**, el servicio `betbot-status-web` no está corriendo o falló al arrancar (`journalctl -u betbot-status-web`).
+
 ### Comandos systemd directos
 
 ```bash

@@ -1,21 +1,35 @@
-# Ejemplo para nginx en Ubuntu (copiar a /etc/nginx/sites-available/ y enlazar en sites-enabled).
+# =============================================================================
+# Nginx → proxy al panel BetBot (127.0.0.1:8765)
 #
+# Requisito: el panel debe estar corriendo en la VM:
+#   ./deploy/manage.sh dashboard-start
+#   sudo systemctl status betbot-status-web
+#
+# Instalación típica (Ubuntu):
 #   sudo apt install nginx
 #   sudo cp deploy/nginx-status-web.conf.example /etc/nginx/sites-available/betbot-status
-#   sudo sed -i "s|__SERVER_NAME__|tu-dominio-o-ip|" /etc/nginx/sites-available/betbot-status
-#   sudo ln -sf /etc/nginx/sites-available/betbot-status /etc/nginx/sites-enabled/
+#
+# IMPORTANTE — Si ves "Welcome to nginx!" al abrir la IP en el navegador:
+#   El sitio por defecto sigue ganando. Quitá el default UNA vez:
+#     sudo rm /etc/nginx/sites-enabled/default
+#   Este archivo ya usa default_server para que betbot-status atienda el puerto 80.
+#
+#   sudo ln -sf /etc/nginx/sites-available/betbot-status /etc/nginx/sites-enabled/betbot-status
 #   sudo nginx -t && sudo systemctl reload nginx
 #
-# El panel Python debe estar en marcha: ./deploy/manage.sh dashboard-start
+# Si ves 502 Bad Gateway: betbot-status-web no está activo o no escucha en 8765.
+#   journalctl -u betbot-status-web -n 30 --no-pager
 #
 # Opcional — basic auth:
 #   sudo apt install apache2-utils
 #   sudo htpasswd -c /etc/nginx/.htpasswd-betbot tu_usuario
 #   Descomentá las dos líneas "auth_basic" abajo.
+# =============================================================================
 
 server {
-    listen 80;
-    server_name __SERVER_NAME__;
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
 
     location / {
         # auth_basic           "BetBot";

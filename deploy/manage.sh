@@ -314,7 +314,7 @@ case "$CMD" in
         echo -e "  ${YELLOW}./deploy/manage.sh reset-paper crypto${NC}   # resetea solo crypto"
         echo -e "  ${YELLOW}./deploy/manage.sh scan-once crypto paper${NC} # ciclo manual crypto"
         echo -e "  ${YELLOW}./deploy/manage.sh dashboard-install && ./deploy/manage.sh dashboard-start${NC}"
-        echo -e "    ${YELLOW}# luego nginx: deploy/nginx-status-web.conf.example${NC}"
+        echo -e "    ${YELLOW}# nginx: deploy/nginx-status-web.conf.example (quitar sites-enabled/default)${NC}"
         echo ""
         ;;
 
