@@ -55,8 +55,10 @@ class SignalAction(str, Enum):
 
 
 class CryptoPriceDirection(str, Enum):
-    ABOVE = "above"
-    BELOW = "below"
+    ABOVE = "above"   # YES = price above threshold
+    BELOW = "below"   # YES = price below threshold
+    UP    = "up"      # YES = price goes up (Up or Down markets)
+    DOWN  = "down"    # YES = price goes down
 
 
 # ─── Market ──────────────────────────────────────────────────────────────────
@@ -92,7 +94,7 @@ class CryptoMarketInfo(BaseModel):
     question: str
     asset: str                       # "BTC" or "ETH"
     direction: CryptoPriceDirection
-    threshold_usd: float
+    threshold_usd: Optional[float] = None  # None for Up/Down markets
     target_datetime: datetime
     minutes_to_resolution: float
 

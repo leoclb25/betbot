@@ -55,7 +55,9 @@ class CryptoStrategy:
         if true_prob is None:
             return _skip(market.condition_id, market.question, "too close to resolution")
 
-        market_price = market.yes_price if info.direction == CryptoPriceDirection.ABOVE else market.no_price
+        # For UP/DOWN markets: YES=up, NO=down. true_prob = P(up), so compare against yes_price.
+        # For price-level markets: same logic — true_prob = P(above/below), side determined by edge.
+        market_price = market.yes_price
         edge, side = self._risk.calculate_edge(true_prob, market_price, is_hold_strategy=False)
 
         if edge < self._risk.params.min_edge:
@@ -120,32 +122,47 @@ class CryptoStrategy:
         default_vol = _DEFAULT_VOLATILITY.get(info.asset, 0.0007)
         sigma = env_float(f"{info.asset}_VOLATILITY_PER_MIN", default_vol)
 
-        S, K = spot, info.threshold_usd
-        if S <= 0 or K <= 0 or sigma <= 0:
+        if spot <= 0 or sigma <= 0:
             return None
 
-        d2 = (math.log(S / K) + (-sigma ** 2 / 2) * T) / (sigma * math.sqrt(T))
-        raw_prob = _norm_cdf(d2) if info.direction == CryptoPriceDirection.ABOVE else 1.0 - _norm_cdf(d2)
+        is_up_or_down = info.direction in (CryptoPriceDirection.UP, CryptoPriceDirection.DOWN)
 
-        # Momentum adjustment (max ±2%)
+        if is_up_or_down:
+            # K = current spot; P(S_T > S_0) from lognormal drift
+            K = spot
+        else:
+            K = info.threshold_usd
+            if K is None or K <= 0:
+                return None
+
+        d2 = (math.log(spot / K) + (-sigma ** 2 / 2) * T) / (sigma * math.sqrt(T))
+
+        if info.direction in (CryptoPriceDirection.ABOVE, CryptoPriceDirection.UP):
+            raw_prob = _norm_cdf(d2)
+        else:
+            raw_prob = 1.0 - _norm_cdf(d2)
+
+        # Momentum adjustment (max ±3% for directional, ±2% for price-level)
         price_rising = pct_24h > 0
-        if info.direction == CryptoPriceDirection.ABOVE:
-            mom_adj = min(0.02, abs(pct_24h) / 100 * 0.4) * (1 if price_rising else -1)
+        max_mom = 0.03 if is_up_or_down else 0.02
+        if info.direction in (CryptoPriceDirection.ABOVE, CryptoPriceDirection.UP):
+            mom_adj = min(max_mom, abs(pct_24h) / 100 * 0.5) * (1 if price_rising else -1)
         else:
-            mom_adj = min(0.02, abs(pct_24h) / 100 * 0.4) * (-1 if price_rising else 1)
+            mom_adj = min(max_mom, abs(pct_24h) / 100 * 0.5) * (-1 if price_rising else 1)
 
-        # Imbalance adjustment (max ±3%)
-        if info.direction == CryptoPriceDirection.ABOVE:
-            imb_adj = max(-0.03, min(0.03, imbalance * 0.03))
+        # Imbalance adjustment (max ±4% for directional, ±3% for price-level)
+        max_imb = 0.04 if is_up_or_down else 0.03
+        if info.direction in (CryptoPriceDirection.ABOVE, CryptoPriceDirection.UP):
+            imb_adj = max(-max_imb, min(max_imb, imbalance * max_imb))
         else:
-            imb_adj = max(-0.03, min(0.03, -imbalance * 0.03))
+            imb_adj = max(-max_imb, min(max_imb, -imbalance * max_imb))
 
-        # Confidence shrinkage (pulls toward 0.5 when T < 10 min)
+        # Confidence shrinkage
         confidence = max(0.35, 1.0 - 0.04 * max(0, 10 - T))
         true_prob = max(0.01, min(0.99, 0.5 + (raw_prob + mom_adj + imb_adj - 0.5) * confidence))
 
         logger.debug(
-            f"[CRYPTO] {info.asset} T={T:.0f}min spot={S:.2f} K={K:.2f} "
+            f"[CRYPTO] {info.asset} {info.direction.value} T={T:.0f}min spot={spot:.2f} K={K:.2f} "
             f"raw={raw_prob:.3f} mom={mom_adj:+.3f} imb={imb_adj:+.3f} "
             f"conf={confidence:.2f} → p={true_prob:.3f}"
         )
