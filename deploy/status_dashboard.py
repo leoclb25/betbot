@@ -209,7 +209,18 @@ def build_html(repo: Path) -> str:
       padding: 1rem 1.25rem 2rem;
       line-height: 1.45;
     }}
-    h1 {{ font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }}
+    .page-head {{
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+      gap: 0.75rem 1rem; margin-bottom: 0.35rem;
+    }}
+    h1 {{ font-size: 1.25rem; font-weight: 600; margin: 0; }}
+    button.btn-reload {{
+      font: inherit; font-size: 0.9rem; font-weight: 600;
+      color: var(--text); background: #243044; border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.45rem 1rem; cursor: pointer;
+    }}
+    button.btn-reload:hover {{ background: #2d3f56; border-color: #3d5270; }}
+    button.btn-reload:active {{ transform: scale(0.98); }}
     .sub {{ color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }}
     section.bot {{
       background: var(--card);
@@ -242,8 +253,11 @@ def build_html(repo: Path) -> str:
   </style>
 </head>
 <body>
-  <h1>BetBot — balance en vivo</h1>
-  <p class="sub">Mismo origen de datos que <code>./deploy/manage.sh balance</code>. Esta página se recarga sola cada 90s.</p>
+  <header class="page-head">
+    <h1>BetBot — balance en vivo</h1>
+    <button type="button" class="btn-reload" onclick="location.reload()" aria-label="Actualizar datos">Actualizar</button>
+  </header>
+  <p class="sub">Mismo origen de datos que <code>./deploy/manage.sh balance</code>. Podés recargar cuando quieras; también se actualiza sola cada 90s.</p>
   {weather}
   {crypto}
 </body>
