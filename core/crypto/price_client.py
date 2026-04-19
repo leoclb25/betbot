@@ -70,6 +70,61 @@ class BinancePriceClient:
         self._stats_cache[asset] = (stats, datetime.now(timezone.utc))
         return stats
 
+    def get_short_momentum(self, asset: str, minutes: int = 3) -> float:
+        """Return % price change over the last `minutes` using 1-minute OHLC candles."""
+        pair = self._pair(asset)
+        result_key = _RESULT_KEYS.get(asset.upper(), pair)
+        try:
+            self._throttle()
+            resp = self._session.get(
+                f"{_BASE}/OHLC",
+                params={"pair": pair, "interval": 1},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("error"):
+                return 0.0
+            candles = data["result"].get(result_key) or next(iter(v for k, v in data["result"].items() if k != "last"))
+            # Each candle: [time, open, high, low, close, vwap, volume, count]
+            if len(candles) < minutes + 1:
+                return 0.0
+            close_now  = float(candles[-2][4])   # last complete candle close
+            close_prev = float(candles[-(minutes + 1)][4])
+            if close_prev == 0:
+                return 0.0
+            return (close_now - close_prev) / close_prev * 100
+        except Exception as exc:
+            logger.warning(f"[KRAKEN] OHLC failed for {asset}: {exc}")
+            return 0.0
+
+    def get_trade_flow(self, asset: str, count: int = 30) -> float:
+        """Return trade flow imbalance: +1 = all buys, -1 = all sells."""
+        pair = self._pair(asset)
+        result_key = _RESULT_KEYS.get(asset.upper(), pair)
+        try:
+            self._throttle()
+            resp = self._session.get(
+                f"{_BASE}/Trades",
+                params={"pair": pair, "count": count},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("error"):
+                return 0.0
+            trades = data["result"].get(result_key) or next(iter(v for k, v in data["result"].items() if k != "last"))
+            # Each trade: [price, volume, time, buy/sell, market/limit, misc]
+            buy_vol  = sum(float(t[1]) for t in trades if t[3] == "b")
+            sell_vol = sum(float(t[1]) for t in trades if t[3] == "s")
+            total = buy_vol + sell_vol
+            if total == 0:
+                return 0.0
+            return (buy_vol - sell_vol) / total
+        except Exception as exc:
+            logger.warning(f"[KRAKEN] trades failed for {asset}: {exc}")
+            return 0.0
+
     def get_order_book_imbalance(self, asset: str, depth: int = 10) -> float:
         pair = self._pair(asset)
         result_key = _RESULT_KEYS.get(asset.upper(), pair)
