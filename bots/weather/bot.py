@@ -17,16 +17,27 @@ from typing import Union
 from loguru import logger
 
 from bots.base import BaseBot
+from bots.weather.arbitrage import detect_arbitrage_cids
+from bots.weather.stability import ForecastStabilityGuard
 from bots.weather.strategy import WeatherStrategy
-from core.env_utils import env_int
+from core.env_utils import env_float, env_int
 from core.models import BotMode, BotSignal, Market, OrderSide, PortfolioState, Position, SignalAction
 from core.portfolio.logger import OperationsLogger
 from core.portfolio.tracker import PortfolioTracker
 from core.polymarket.client import PolymarketClient
 from core.polymarket.paper_client import PaperClient
 from core.risk.manager import RiskManager, load_risk_params
+from core.weather.climatology import ClimatologyClient
 from core.weather.client import WeatherClient
 from bots.weather.parser import WeatherMarketParser
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    import os
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 # Default keywords to filter weather markets
 def _synthetic_market_for_orphan_position(position: Position) -> Market:
@@ -68,11 +79,15 @@ class WeatherBot(BaseBot):
         risk_manager: RiskManager,
         tracker: PortfolioTracker,
         ops_logger: OperationsLogger,
+        parser: WeatherMarketParser,
+        stability_guard: ForecastStabilityGuard | None = None,
         scan_interval_seconds: int = 3600,
         keywords: list[str] | None = None,
     ) -> None:
         super().__init__(client, risk_manager, tracker, ops_logger, scan_interval_seconds)
         self._strategy = strategy
+        self._parser = parser
+        self._stability = stability_guard
         self._keywords = keywords or WEATHER_KEYWORDS
         # Cache of condition_id → position_id to avoid duplicate entries
         self._open_condition_ids: set[str] = self._load_open_condition_ids()
@@ -107,7 +122,19 @@ class WeatherBot(BaseBot):
         risk_manager = RiskManager(load_risk_params())
         weather_client = WeatherClient()
         parser = WeatherMarketParser(weather_client)
-        strategy = WeatherStrategy(weather_client, parser, risk_manager)
+
+        climatology = ClimatologyClient() if _env_bool("CLIMATOLOGY_ENABLED", True) else None
+        stability_guard = ForecastStabilityGuard(
+            max_delta=env_float("FORECAST_STABILITY_MAX_DELTA", 0.05),
+            required_observations=env_int("FORECAST_STABILITY_REQUIRED_OBS", 2),
+            enabled=_env_bool("FORECAST_STABILITY_ENABLED", True),
+        )
+        strategy = WeatherStrategy(
+            weather_client,
+            parser,
+            risk_manager,
+            climatology=climatology,
+        )
         tracker = PortfolioTracker(client)
         ops_logger = OperationsLogger(mode, bot_name="weather")
 
@@ -119,6 +146,8 @@ class WeatherBot(BaseBot):
             risk_manager=risk_manager,
             tracker=tracker,
             ops_logger=ops_logger,
+            parser=parser,
+            stability_guard=stability_guard,
             scan_interval_seconds=scan_interval,
         )
 
@@ -148,16 +177,61 @@ class WeatherBot(BaseBot):
             and m.question.strip().lower() not in open_questions
         ]
 
+        # Detectar grupos arbitrables (overround entre bins exactos de temperatura)
+        try:
+            arb_cids = detect_arbitrage_cids(
+                filtered,
+                self._parser,
+                overround_threshold=env_float("ARBITRAGE_OVERROUND_THRESHOLD", 1.05),
+            )
+        except Exception as exc:
+            logger.debug(f"[WEATHER] arbitrage detection failed: {exc}")
+            arb_cids = set()
+        # La estrategia los consulta para relajar MIN_EDGE en el lado NO
+        self._strategy._arb_cids = arb_cids
+
         logger.debug(
             f"[WEATHER] {len(all_markets)} raw → {len(filtered)} after filters "
-            f"(resolution {min_days}-{max_days} days, liq≥${self.risk.params.min_liquidity_usd:.0f})"
+            f"(resolution {min_days}-{max_days} days, liq≥${self.risk.params.min_liquidity_usd:.0f}) | "
+            f"arb_cids={len(arb_cids)}"
         )
         return filtered
 
     def evaluate_market(self, market: Market) -> BotSignal:
-        """Evaluate one market using the weather strategy."""
+        """Evaluate one market using the weather strategy.
+
+        Aplica el stability guard: una señal ENTER solo se autoriza si el
+        forecast es consistente entre scans consecutivos. Excepción: mercados
+        en grupos arbitrables pasan directo (el edge es estructural).
+        """
         state = self.tracker.get_state()
-        return self._strategy.evaluate_market(market, state)
+        signal = self._strategy.evaluate_market(market, state)
+
+        if (
+            signal.action == SignalAction.ENTER
+            and self._stability is not None
+            and signal.true_probability is not None
+            and market.condition_id not in self._strategy._arb_cids
+        ):
+            is_stable, reason = self._stability.observe(
+                market.condition_id, signal.true_probability
+            )
+            if not is_stable:
+                logger.debug(
+                    f"[WEATHER] stability hold '{market.question[:60]}' | {reason}"
+                )
+                return BotSignal(
+                    action=SignalAction.SKIP,
+                    condition_id=market.condition_id,
+                    question=market.question,
+                    side=signal.side,
+                    market_price=signal.market_price,
+                    true_probability=signal.true_probability,
+                    edge=signal.edge,
+                    reason=f"stability guard: {reason}",
+                )
+
+        return signal
 
     def manage_open_positions(self) -> None:
         """Check all open positions for exit signals."""
@@ -220,6 +294,9 @@ class WeatherBot(BaseBot):
                     edge=signal.edge,
                 )
                 self._open_condition_ids.add(market.condition_id)
+                # Limpiamos el tracking de estabilidad (la posición ya está abierta)
+                if self._stability is not None:
+                    self._stability.clear(market.condition_id)
 
                 self.logger.log_trade(trade, notes=signal.reason)
                 self.logger.log_position_open(

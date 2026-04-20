@@ -451,11 +451,17 @@ def status(bot: str) -> None:
 @cli.command()
 @click.option("--tail", "-n", default=20, help="Number of last operations to show.")
 @click.option("--filter", "event_filter", default=None, help="Filter by event type (e.g. trade, position_open).")
-def operations(tail: int, event_filter: str | None) -> None:
+@click.option(
+    "--bot",
+    type=click.Choice(["weather", "crypto"], case_sensitive=False),
+    default="weather",
+    show_default=True,
+)
+def operations(tail: int, event_filter: str | None, bot: str) -> None:
     """Show recent operations log."""
-    ops_path = OPS_LOG
+    ops_path = _REPO_ROOT / "data" / "logs" / f"{bot}_operations.jsonl"
     if not ops_path.exists():
-        console.print("[yellow]No operations log found. Run the bot first.[/]")
+        console.print(f"[yellow]No operations log found for {bot}. Run the bot first.[/]")
         return
 
     lines = ops_path.read_text().strip().split("\n")
@@ -495,6 +501,150 @@ def operations(tail: int, event_filter: str | None) -> None:
         table.add_row(ts, event, side, amount, pnl_str, question)
 
     console.print(table)
+
+
+# ── calibration command ───────────────────────────────────────────────────────
+
+
+def _load_ops_records(bot_name: str) -> list[dict]:
+    path = _REPO_ROOT / "data" / "logs" / f"{bot_name}_operations.jsonl"
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+@cli.command()
+@click.option(
+    "--bot",
+    type=click.Choice(["weather", "crypto"], case_sensitive=False),
+    default="weather",
+    show_default=True,
+)
+@click.option("--buckets", default=5, help="Cantidad de buckets de probabilidad.")
+def calibration(bot: str, buckets: int) -> None:
+    """Reporte de calibración: predicted_true_prob vs actual hit rate.
+
+    Agrupa posiciones cerradas por bucket de probabilidad estimada al entrar y
+    compara con la fracción que terminaron ganadoras. Una calibración perfecta
+    tiene predicted ≈ actual en cada bucket.
+
+    Casos a interpretar:
+      • actual << predicted → modelo overconfident → bajar KELLY_FRACTION o subir MIN_EDGE
+      • actual >> predicted → modelo underconfident → subir KELLY_FRACTION
+      • spread grande dentro de un bucket → forecast no es fuente de edge
+    """
+    records = _load_ops_records(bot)
+    if not records:
+        console.print(f"[yellow]No operations log found for {bot}.[/]")
+        return
+
+    # Emparejar position_open → position_close usando (condition_id, side)
+    # (asumiendo 1 posición abierta por side+condition a la vez)
+    opens: dict[tuple, dict] = {}
+    pairs: list[tuple[dict, dict]] = []
+    for r in records:
+        event = r.get("event", "")
+        side = r.get("side", "")
+        cid = r.get("condition_id", "")
+        if not cid or not side:
+            continue
+        key = (cid, side)
+        if event == "position_open":
+            opens[key] = r
+        elif event == "position_close":
+            op = opens.pop(key, None)
+            if op is not None:
+                pairs.append((op, r))
+
+    if not pairs:
+        console.print(f"[yellow]No closed position pairs found for {bot}.[/]")
+        return
+
+    # Para cada par, la "prob de acierto" que el modelo asignó al side apostado:
+    #   side=YES → entry_true_prob
+    #   side=NO  → 1 - entry_true_prob
+    # "win" = pnl_usd > 0 (cerrada con ganancia)
+    buckets_data: list[list[tuple[float, bool, float]]] = [[] for _ in range(buckets)]
+    overall_wins = 0
+    overall_total = 0
+    overall_pnl = 0.0
+
+    for op, cl in pairs:
+        side = op.get("side", "")
+        true_prob = op.get("true_prob")
+        if true_prob is None:
+            continue
+        side_prob = true_prob if side == "YES" else 1.0 - true_prob
+        pnl = cl.get("pnl_usd", 0.0)
+        is_win = pnl > 0
+        bucket_idx = min(buckets - 1, int(side_prob * buckets))
+        buckets_data[bucket_idx].append((side_prob, is_win, pnl))
+        if is_win:
+            overall_wins += 1
+        overall_total += 1
+        overall_pnl += pnl
+
+    table = Table(
+        title=f"Calibration Report — {bot} ({len(pairs)} closed positions)",
+        box=box.SIMPLE_HEAVY,
+    )
+    table.add_column("Bucket (predicted)", width=18)
+    table.add_column("N",  justify="right", width=4)
+    table.add_column("Avg predicted", justify="right", width=14)
+    table.add_column("Actual win rate", justify="right", width=15)
+    table.add_column("Bias",           justify="right", width=9)
+    table.add_column("Sum P&L",        justify="right", width=10)
+
+    for i in range(buckets):
+        low = i / buckets
+        high = (i + 1) / buckets
+        data = buckets_data[i]
+        if not data:
+            table.add_row(f"{low:.0%} – {high:.0%}", "0", "—", "—", "—", "—")
+            continue
+        n = len(data)
+        avg_pred = sum(d[0] for d in data) / n
+        wins = sum(1 for d in data if d[1])
+        actual = wins / n
+        bias = actual - avg_pred
+        bias_str = f"{bias:+.1%}"
+        bias_color = "green" if bias >= 0 else "red"
+        pnl_sum = sum(d[2] for d in data)
+        pnl_sign = "+" if pnl_sum >= 0 else ""
+        pnl_color = "green" if pnl_sum >= 0 else "red"
+        table.add_row(
+            f"{low:.0%} – {high:.0%}",
+            str(n),
+            f"{avg_pred:.1%}",
+            f"{actual:.1%} ({wins}/{n})",
+            f"[{bias_color}]{bias_str}[/{bias_color}]",
+            f"[{pnl_color}]{pnl_sign}${pnl_sum:.2f}[/{pnl_color}]",
+        )
+
+    console.print(table)
+
+    if overall_total > 0:
+        overall_wr = overall_wins / overall_total
+        pnl_sign = "+" if overall_pnl >= 0 else ""
+        pnl_color = "green" if overall_pnl >= 0 else "red"
+        console.print(
+            f"\n  Overall: {overall_wins}/{overall_total} win rate "
+            f"[bold]{overall_wr:.1%}[/]  |  total P&L: "
+            f"[{pnl_color}]{pnl_sign}${overall_pnl:.2f}[/{pnl_color}]"
+        )
+        console.print(
+            "  [dim]Bias positivo = predicciones conservadoras (real > predicho). "
+            "Bias negativo = modelo overconfident (real < predicho).[/dim]"
+        )
 
 
 # ── paper-reset command ───────────────────────────────────────────────────────

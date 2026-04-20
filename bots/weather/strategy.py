@@ -31,9 +31,11 @@ from core.models import (
     PortfolioState,
     Side,
     SignalAction,
+    WeatherCondition,
     WeatherMarketInfo,
 )
 from core.risk.manager import RiskManager
+from core.weather.climatology import ClimatologyClient
 from core.weather.client import WeatherClient
 
 
@@ -43,6 +45,20 @@ def _market_reference_date(market: Market) -> date:
     if ed.tzinfo is not None:
         return ed.astimezone(timezone.utc).date()
     return ed.date()
+
+
+def _effective_range_c(info: WeatherMarketInfo) -> Optional[float]:
+    """
+    Ancho efectivo de la banda (°C) para mercados de temperatura.
+    None si no aplica (rain, above/below sin banda, etc).
+    """
+    if info.condition == WeatherCondition.TEMPERATURE_EXACT:
+        if info.threshold is None:
+            return None
+        if info.threshold_high is not None:
+            return abs(info.threshold_high - info.threshold)
+        return 1.0  # ventana ±0.5°C implícita
+    return None
 
 
 class WeatherStrategy:
@@ -55,10 +71,16 @@ class WeatherStrategy:
         weather_client: WeatherClient,
         parser: WeatherMarketParser,
         risk_manager: RiskManager,
+        climatology: Optional[ClimatologyClient] = None,
+        arbitrage_cids: Optional[set[str]] = None,
     ) -> None:
         self._weather = weather_client
         self._parser = parser
         self._risk = risk_manager
+        self._climatology = climatology
+        # Condition IDs marcados por el scanner como parte de un grupo arbitrable
+        # (overround entre bins mutuamente excluyentes de la misma ciudad+fecha)
+        self._arb_cids: set[str] = arbitrage_cids if arbitrage_cids is not None else set()
 
     # ── Entry evaluation ─────────────────────────────────────────────────────
 
@@ -100,10 +122,55 @@ class WeatherStrategy:
                 reason="could not fetch weather forecast",
             )
 
-        # Step 3: Calculate true probability
-        weather_prob = self._weather.calculate_probability(
-            forecast, info.condition, info.threshold, info.threshold_high
+        # Step 3a: quick-pass con anchor=0.5 para descartar mercados sin potencial.
+        # Evita fetchear climatología (costosa, muchos mercados por ciclo) cuando
+        # ya es evidente que ni el mejor anchor cambiaría la decisión.
+        quick = self._weather.calculate_probability(
+            forecast,
+            info.condition,
+            info.threshold,
+            info.threshold_high,
+            climatology_prob=None,
         )
+        quick_edge, _ = self._risk.calculate_edge(
+            true_prob=quick.true_probability,
+            market_price=market.yes_price,
+            is_hold_strategy=True,
+        )
+
+        # Step 3b: Solo fetcheamos climatología si el mercado muestra potencial
+        # (edge actual >= mitad del MIN_EDGE por defecto) o si confidence es baja
+        # (donde el anchor marca más diferencia).
+        climatology_prob: Optional[float] = None
+        worth_climatology = (
+            quick_edge >= (self._risk.params.min_edge * 0.5)
+            or quick.confidence < 0.6
+        )
+        if self._climatology is not None and worth_climatology:
+            try:
+                climatology_prob = self._climatology.probability(
+                    latitude=info.latitude,
+                    longitude=info.longitude,
+                    target_date=info.target_date,
+                    condition=info.condition,
+                    threshold=info.threshold,
+                    threshold_high=info.threshold_high,
+                )
+            except Exception as exc:
+                logger.debug(f"[STRATEGY] climatology fetch failed: {exc}")
+                climatology_prob = None
+
+        # Step 3c: probabilidad final con blend (si tenemos climatología)
+        if climatology_prob is None:
+            weather_prob = quick
+        else:
+            weather_prob = self._weather.calculate_probability(
+                forecast,
+                info.condition,
+                info.threshold,
+                info.threshold_high,
+                climatology_prob=climatology_prob,
+            )
         true_prob = weather_prob.true_probability
 
         # Step 4: Calculate edge
@@ -115,16 +182,30 @@ class WeatherStrategy:
 
         market_price = market.yes_price if side == Side.YES else market.no_price
 
+        # MIN_EDGE efectivo según ancho de banda (asimétrico YES/NO)
+        range_c = _effective_range_c(info)
+        min_edge = self._risk.effective_min_edge(side, range_c)
+
+        # Arbitraje estructural: si este mercado es parte de un grupo con overround,
+        # relajamos MIN_EDGE en el lado NO (edge estructural independiente del forecast)
+        is_arb = market.condition_id in self._arb_cids
+        if is_arb and side == Side.NO:
+            min_edge = min(min_edge, 0.02)
+
         models_str = ",".join(weather_prob.models_used) if weather_prob.models_used else "?"
+        clim_str = f"{climatology_prob:.2%}" if climatology_prob is not None else "n/a"
+        range_str = f"{range_c:.2f}°C" if range_c is not None else "n/a"
         logger.debug(
             f"[STRATEGY] {market.question[:70]} | "
             f"raw={weather_prob.raw_probability:.2%} → true={true_prob:.2%} | "
-            f"market={market.yes_price:.2%} edge={edge:.2%} side={side.value} | "
+            f"climate={clim_str} range={range_str} | "
+            f"market={market.yes_price:.2%} edge={edge:.2%} side={side.value} min_edge={min_edge:.1%}"
+            f"{' [ARB]' if is_arb else ''} | "
             f"models={models_str} agreement={weather_prob.model_agreement:.2f} "
             f"confidence={weather_prob.confidence:.0%} members={forecast.member_count}"
         )
 
-        if edge < self._risk.params.min_edge:
+        if edge < min_edge:
             return BotSignal(
                 action=SignalAction.SKIP,
                 condition_id=market.condition_id,
@@ -134,7 +215,8 @@ class WeatherStrategy:
                 true_probability=true_prob,
                 edge=edge,
                 reason=(
-                    f"edge {edge:.1%} below minimum {self._risk.params.min_edge:.1%} | "
+                    f"edge {edge:.1%} below minimum {min_edge:.1%} "
+                    f"(range={range_str}, side={side.value}) | "
                     f"true_prob={true_prob:.1%} market={market.yes_price:.1%}"
                 ),
             )
@@ -195,8 +277,25 @@ class WeatherStrategy:
                 location_name=info.location,
             )
             if forecast and forecast.member_count > 0:
+                climatology_prob: Optional[float] = None
+                if self._climatology is not None:
+                    try:
+                        climatology_prob = self._climatology.probability(
+                            latitude=info.latitude,
+                            longitude=info.longitude,
+                            target_date=info.target_date,
+                            condition=info.condition,
+                            threshold=info.threshold,
+                            threshold_high=info.threshold_high,
+                        )
+                    except Exception:
+                        climatology_prob = None
                 weather_prob = self._weather.calculate_probability(
-                    forecast, info.condition, info.threshold, info.threshold_high
+                    forecast,
+                    info.condition,
+                    info.threshold,
+                    info.threshold_high,
+                    climatology_prob=climatology_prob,
                 )
                 new_true_prob = weather_prob.true_probability
 

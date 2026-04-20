@@ -1,0 +1,45 @@
+{
+  "cash_usd": 95.0,
+  "peak_value_usd": 100.0,
+  "positions": {
+    "521f5ab3-79e3-4a08-ba3a-a86d690f06f6": {
+      "position_id": "521f5ab3-79e3-4a08-ba3a-a86d690f06f6",
+      "condition_id": "0x9a0b2e84b50ebc300670d5f845e230a6adff9c38b376c2456709eb816966a371",
+      "question": "Will the highest temperature in Seoul be 16\u00b0C on April 22?",
+      "side": "NO",
+      "status": "OPEN",
+      "entry_price": 0.725,
+      "entry_amount_usd": 5.0,
+      "entry_fee_usd": 0.1,
+      "shares": 6.7586206896551735,
+      "entry_true_prob": 0.08060798043810494,
+      "entry_edge": 0.17439201956189512,
+      "opened_at": "2026-04-20 21:59:09.999903+00:00",
+      "market_end_date": "2026-04-22 12:00:00+00:00",
+      "closed_at": null,
+      "exit_price": null,
+      "exit_fee_usd": 0.0,
+      "pnl_usd": null,
+      "pnl_pct": null,
+      "exit_reason": "",
+      "mode": "paper",
+      "current_value_usd": 4.9
+    }
+  },
+  "trades": [
+    {
+      "trade_id": "b433336d-88b3-4b9c-8567-5dbc32d0b165",
+      "condition_id": "0x9a0b2e84b50ebc300670d5f845e230a6adff9c38b376c2456709eb816966a371",
+      "question": "Will the highest temperature in Seoul be 16\u00b0C on April 22?",
+      "timestamp": "2026-04-20 21:59:09.999903+00:00",
+      "side": "NO",
+      "order_side": "BUY",
+      "price": 0.725,
+      "amount_usd": 5.0,
+      "fee_usd": 0.1,
+      "shares": 6.7586206896551735,
+      "mode": "paper",
+      "notes": ""
+    }
+  ]
+}

@@ -20,6 +20,8 @@ We use KELLY_FRACTION * f* (default 25%) to be conservative.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
 
 from loguru import logger
 
@@ -42,13 +44,20 @@ class RiskParams:
     max_portfolio_risk: float    # max total % of portfolio exposed
     daily_loss_limit: float      # daily loss % that triggers pause
     drawdown_limit: float        # drawdown % from peak that triggers pause
-    stop_loss_pct: float         # exit when position loses this fraction
+    stop_loss_pct: float         # exit when position loses this fraction (0 disables)
     take_profit_pct: float       # exit early when profit hits this fraction
     min_position_usd: float      # minimum position size (below this, fees not worth it)
     min_liquidity_usd: float     # minimum market liquidity to trade
     min_market_price: float      # minimum price on either side (filters broken/dead markets)
     max_market_price: float      # maximum price on either side (= 1 - min_market_price)
     max_entries_per_cycle: int   # cap nuevas entradas por ciclo (evita ráfagas en arranque)
+    # Asimetría YES/NO en mercados de banda angosta (rangos exactos de temperatura)
+    narrow_range_c: float        # banda ≤ X°C se considera "angosta" (ruido ensemble > señal)
+    narrow_range_yes_min_edge: float  # YES en banda angosta requiere edge mucho mayor
+    narrow_range_no_min_edge: float   # NO en banda angosta: edge mínimo bajo (bet estructural)
+    # Exit timing
+    min_position_age_hours: float     # no permitir exit por precio antes de esto (deja que resuelva)
+    thesis_flip_min_edge: float       # edge requerido en lado contrario para invalidar tesis
 
 
 def load_risk_params(prefix: str = "") -> RiskParams:
@@ -74,13 +83,20 @@ def load_risk_params(prefix: str = "") -> RiskParams:
         max_portfolio_risk=_f("MAX_PORTFOLIO_RISK", 0.35),
         daily_loss_limit=_f("DAILY_LOSS_LIMIT", 0.10),
         drawdown_limit=_f("DRAWDOWN_LIMIT", 0.25),
-        stop_loss_pct=_f("STOP_LOSS_PCT", 0.40),
+        # Stop-loss default DESHABILITADO (0.0): en mercados que resuelven binariamente
+        # cristalizar -40% por ruido de precio es peor que esperar a resolución.
+        stop_loss_pct=_f("STOP_LOSS_PCT", 0.0),
         take_profit_pct=_f("TAKE_PROFIT_PCT", 0.40),
         min_position_usd=_f("MIN_POSITION_USD", 5.0),
         min_liquidity_usd=_f("MIN_LIQUIDITY_USD", 1000.0),
         min_market_price=_f("MIN_MARKET_PRICE", 0.05),
         max_market_price=_f("MAX_MARKET_PRICE", 0.95),
         max_entries_per_cycle=_i("MAX_ENTRIES_PER_CYCLE", 2),
+        narrow_range_c=_f("NARROW_RANGE_C", 1.5),
+        narrow_range_yes_min_edge=_f("NARROW_RANGE_YES_MIN_EDGE", 0.12),
+        narrow_range_no_min_edge=_f("NARROW_RANGE_NO_MIN_EDGE", 0.03),
+        min_position_age_hours=_f("MIN_POSITION_AGE_HOURS", 12.0),
+        thesis_flip_min_edge=_f("THESIS_FLIP_MIN_EDGE", 0.07),
     )
 
 
@@ -91,6 +107,26 @@ class RiskManager:
 
     def __init__(self, params: RiskParams | None = None) -> None:
         self.params = params or load_risk_params()
+
+    # ── Asymmetric min edge by market shape ──────────────────────────────────
+
+    def effective_min_edge(self, side: Side, range_c: Optional[float]) -> float:
+        """
+        MIN_EDGE ajustado por forma del mercado.
+
+        Cuando el mercado es una banda de temperatura angosta (≤ narrow_range_c),
+        el ruido del ensemble (spread ~1-2°C entre miembros) supera el ancho de la
+        banda, así que:
+          - YES requiere edge MUCHO mayor (el riesgo de que el forecast deje la banda es alto)
+          - NO requiere edge BAJO (es una apuesta estructural a que no cae exactamente ahí)
+
+        range_c=None → usar el MIN_EDGE por defecto (no es mercado de banda).
+        """
+        if range_c is not None and range_c <= self.params.narrow_range_c:
+            if side == Side.YES:
+                return self.params.narrow_range_yes_min_edge
+            return self.params.narrow_range_no_min_edge
+        return self.params.min_edge
 
     # ── Edge calculation ─────────────────────────────────────────────────────
 
@@ -229,6 +265,12 @@ class RiskManager:
         Check whether an open position should be exited early.
 
         Returns (should_exit, reason). If False, hold.
+
+        Política:
+          - No hay exit alguno antes de MIN_POSITION_AGE_HOURS (evita cristalizar ruido).
+          - Stop-loss deshabilitado por defecto (STOP_LOSS_PCT=0).
+          - Take-profit solo si capturó >= TAKE_PROFIT_PCT del gain teórico.
+          - Thesis-flip: nueva probabilidad apoya el lado contrario con edge >= THESIS_FLIP_MIN_EDGE.
         """
         current_price = (
             current_market.yes_price
@@ -238,12 +280,26 @@ class RiskManager:
         current_value = position.shares * current_price
         pnl_pct = (current_value - position.entry_amount_usd) / position.entry_amount_usd
 
-        # ── Stop loss ────────────────────────────────────────────────────────
-        if pnl_pct <= -self.params.stop_loss_pct:
+        # ── Edad mínima: durante las primeras N horas no se hace exit alguno ─
+        opened_at = position.opened_at
+        if opened_at is not None:
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600.0
+        else:
+            age_hours = float("inf")
+
+        if age_hours < self.params.min_position_age_hours:
+            return False, (
+                f"hold (position age {age_hours:.1f}h < "
+                f"{self.params.min_position_age_hours:.1f}h min)"
+            )
+
+        # ── Stop loss (0 = deshabilitado) ────────────────────────────────────
+        if self.params.stop_loss_pct > 0 and pnl_pct <= -self.params.stop_loss_pct:
             return True, f"stop-loss hit ({pnl_pct:.1%})"
 
         # ── Take profit (early exit) ─────────────────────────────────────────
-        # We compute the theoretical max profit: if our side resolves to 1.0
         max_value = position.shares * 1.0
         max_profit = max_value - position.entry_amount_usd
         if max_profit > 0:
@@ -254,7 +310,7 @@ class RiskManager:
         # ── Thesis invalidation ──────────────────────────────────────────────
         if new_true_prob is not None:
             new_edge, best_side = self.calculate_edge(new_true_prob, current_price)
-            if best_side != position.side and new_edge > self.params.min_edge:
+            if best_side != position.side and new_edge >= self.params.thesis_flip_min_edge:
                 return True, (
                     f"thesis invalidated: new weather model supports opposite side "
                     f"(new_prob={new_true_prob:.2%}, edge={new_edge:.2%})"

@@ -447,6 +447,7 @@ class WeatherClient:
         condition: WeatherCondition,
         threshold: Optional[float] = None,
         threshold_high: Optional[float] = None,
+        climatology_prob: Optional[float] = None,
     ) -> WeatherProbability:
         """
         Convert multi-model ensemble forecast to a calibrated probability.
@@ -455,7 +456,11 @@ class WeatherClient:
           1. Compute raw probability per model (using stored per-model forecasts).
           2. Model agreement = 1 - spread_of_model_probs (normalized).
           3. Composite confidence = days_decay * (0.6 + 0.4 * agreement).
-          4. true_prob = 0.5 + (raw - 0.5) * confidence.
+          4. Anchor: si climatology_prob está disponible úsalo; si no, 0.5.
+          5. true_prob = anchor + (raw - anchor) * confidence.
+
+        Cuando confidence es baja (días futuros, modelos en desacuerdo) la
+        probabilidad se pega al prior (climatología o 0.5), no a la señal ruidosa.
         """
         days_out = (forecast.target_date - date.today()).days
         days_out = max(0, min(days_out, 7))
@@ -501,13 +506,18 @@ class WeatherClient:
             confidence = confidence * range_penalty
 
         confidence = max(0.10, min(1.0, confidence))
-        adjusted = 0.5 + (raw_prob - 0.5) * confidence
 
+        # Prior/anchor: climatología histórica si disponible, si no 0.5 (sin información)
+        anchor = climatology_prob if climatology_prob is not None else 0.5
+        adjusted = anchor + (raw_prob - anchor) * confidence
+        adjusted = max(0.01, min(0.99, adjusted))
+
+        clim_str = f"{climatology_prob:.2%}" if climatology_prob is not None else "none"
         logger.debug(
             f"  prob: raw={raw_prob:.2%} | models={models_used} | "
             f"probs={[f'{p:.2%}' for p in model_probs]} | "
             f"agreement={agreement:.2f} | decay={base_decay:.2f} | "
-            f"confidence={confidence:.2f} | adjusted={adjusted:.2%}"
+            f"confidence={confidence:.2f} | climate={clim_str} | adjusted={adjusted:.2%}"
         )
 
         return WeatherProbability(
